@@ -128,7 +128,7 @@ type openRouterTransport struct {
 }
 
 func (t *openRouterTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("HTTP-Referer", "https://github.com/amachulin/ai-advent-challenge")
+	req.Header.Set("HTTP-Referer", "https://github.com/farmut/ai-advent-challenge")
 	req.Header.Set("X-Title", "ai-adv-agent")
 	return t.RoundTripper.RoundTrip(req)
 }
