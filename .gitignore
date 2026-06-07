@@ -35,5 +35,6 @@ go.work.sum
 
 report_*
 final_report.txt
+test_output.txt
 llm_promt.txt
 temperature_result.txt
