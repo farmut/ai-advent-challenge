@@ -1,0 +1,5 @@
+Для сравнительного теста использовались модели:
+
+qwen/qwen3.5-9b - https://openrouter.ai/qwen/qwen3.5-9b
+qwen/qwen3.5-122b-a10b - https://openrouter.ai/qwen/qwen3.5-122b-a10b
+qwen/qwen3.5-397b-a17b - https://openrouter.ai/qwen/qwen3.5-397b-a17b
