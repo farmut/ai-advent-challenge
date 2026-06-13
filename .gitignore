@@ -8,6 +8,7 @@
 *.so
 *.dylib
 ai-adv-agent
+ai-adv-agent-day*
 
 # Test binary, built with `go test -c`
 *.test
@@ -38,3 +39,7 @@ final_report.txt
 test_output.txt
 llm_promt.txt
 temperature_result.txt
+
+# Chat history
+chat_history*.json
+*_history.json
