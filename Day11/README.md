@@ -17,6 +17,7 @@
 | `--memory-wm` (рабочая память, Layer 2) | **Day11** |
 | `--memory-ltm` (долгосрочная память, Layer 3) | **Day11** |
 | `--memory-update` (авто-обновление WM и LTM) | **Day11** |
+| Clean Architecture (рефакторинг кода по слоям) | **Day11** |
 
 ## Архитектура памяти
 
@@ -197,13 +198,74 @@ requirement: статистика пользователей в отдельно
 | `LLM_MODEL` | Нет | `openai/gpt-4o-mini` (openrouter) |
 | `LLM_BASE_URL` | Нет | Стандартный URL провайдера |
 
+## Архитектура кода (Clean Architecture)
+
+Day11 применяет паттерн **Clean Architecture** (Чистая Архитектура). Код разделён на независимые слои с однонаправленными зависимостями: от внешнего (HTTP, файлы) к внутреннему (бизнес-логика, доменные типы).
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  main.go  (Composition Root)                                   │
+│  Парсинг флагов, переменных окружения, создание зависимостей   │
+└───────────────────────────┬────────────────────────────────────┘
+                            │ создаёт
+       ┌────────────────────▼────────────────────┐
+       │  internal/usecase/                      │
+       │  Бизнес-логика (chat, branch, history,  │
+       │  memory, summary) — зависит от портов   │
+       └────────────┬───────────────────-─────── ┘
+                    │ зависит от интерфейсов
+       ┌────────────▼──────────────────────────-─┐
+       │  internal/port/                         │
+       │  Интерфейсы: LLMClient, HistoryRepo,   │
+       │  StatsRepo, WMRepo, LTMRepo, BranchRepo │
+       └────────────▲──────────────────────────-─┘
+                    │ реализует
+       ┌────────────┴──────────────────────────-─┐
+       │  internal/adapter/                      │
+       │  llm/client.go  — HTTP OpenAI-клиент   │
+       │  storage/file.go — файловые репозитории │
+       └─────────────────────────────────────────┘
+
+       ┌─────────────────────────────────────────┐
+       │  internal/domain/                       │  ← нет внешних зависимостей
+       │  Чистые типы: Message, WorkingMemory,   │
+       │  LongTermMemory, FactsStore, BranchState│
+       │  SessionStats, ModelPrice               │
+       │  + EstimateTokens, PricingFor, Context- │
+       │    Status                               │
+       └─────────────────────────────────────────┘
+```
+
+| Пакет | Роль | Зависит от |
+|---|---|---|
+| `internal/domain` | Сущности и чистые функции | ничего |
+| `internal/port` | Интерфейсы входящих/исходящих портов | `domain` |
+| `internal/usecase` | Оркестрация бизнес-логики | `domain`, `port` |
+| `internal/adapter/llm` | HTTP-клиент для LLM API | `domain`, `port` |
+| `internal/adapter/storage` | Файловые репозитории + path-хелперы | `domain`, `port` |
+| `main.go` | DI-контейнер, CLI, презентация | все слои |
+
+Благодаря этому разделению:
+- **Тесты use cases** не требуют реальных HTTP-запросов или файлов — достаточно mock-репозиториев
+- **Адаптеры** взаимозаменяемы: можно заменить файловое хранилище на Redis, не трогая бизнес-логику
+- **Domain** полностью изолирован — все типы и функции проверяются без внешних зависимостей
+
 ## Сборка и тесты
 
 ```bash
 go build -o ai-adv-agent-day11 .   # или make build
-go test -v ./...                    # или make test
+go test -v ./...                    # или make test  (тесты во всех пакетах)
 go vet ./...                        # или make vet
 ```
+
+Тесты распределены по пакетам:
+
+| Пакет | Тестируемое |
+|---|---|
+| `internal/domain` | Ценообразование, оценка токенов, `ContextStatus` |
+| `internal/usecase` | `TrimHistory`, `SlidingWindow`, system-блоки памяти, `StripJSONFences` |
+| `internal/adapter/llm` | HTTP-payload (токены, stop, temperature, system message) |
+| `internal/adapter/storage` | Path-хелперы, Load/Save для всех 7 типов репозиториев |
 
 ## Makefile targets
 
