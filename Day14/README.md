@@ -1,8 +1,8 @@
-# Day 13: Interactive Agent with Task State Machine
+# Day 14: Interactive Agent with Invariant Enforcement
 
-Расширение Day12. Добавлен **интерактивный режим** (`--interactive`) с машиной состояний из 4 фаз и полной поддержкой **паузы/возобновления** на любом этапе.
+Расширение Day13. Добавлена система **инвариантов** — абсолютных ограничений, которые агент обязан соблюдать на каждом этапе работы. Инварианты проверяются автоматически на трёх уровнях до того, как пользователь что-либо увидит. Также добавлены **slash-команды** (`/exit`, `/restart`, `/pause`) и улучшено управление сессией.
 
-## Что нового в Day13
+## Что нового в Day14
 
 | Возможность | День появления |
 |---|---|
@@ -15,109 +15,218 @@
 | Ветки и checkpoints (`--strategy branching`) | Day10 |
 | 3-слойная память: WM + LTM + Clean Architecture | Day11 |
 | Профиль пользователя (`--profile`) | Day12 |
-| **Интерактивный режим (`--interactive`)** | **Day13** |
-| **Машина состояний: planning → execution → validation → done** | **Day13** |
-| **Пауза/возобновление на любой фазе** | **Day13** |
+| Интерактивный режим, FSM, пауза/возобновление | Day13 |
+| **Инварианты (`--invariants`)** | **Day14** |
+| **Автоматическая проверка compliance на 3 уровнях** | **Day14** |
+| **Slash-команды `/exit` `/restart` `/pause`** | **Day14** |
+| **Вывод путей файлов и статусов памяти при старте** | **Day14** |
 
 ---
 
-## Интерактивный режим
+## Система инвариантов
 
-Запускается флагом `--interactive`. В этом режиме агент не принимает одиночный `--query`, а ведёт диалог через терминал, управляя задачей по фазам.
+Инварианты — это абсолютные ограничения, которые агент **никогда не должен нарушать**: технологический стек, архитектурные правила, бизнес-требования. Они задаются в Markdown-файле и передаются флагом `--invariants`.
 
-### Машина состояний
+```bash
+./ai-adv-agent-day14 --interactive --invariants invariants.md --profile my.md
+```
+
+Пример файла `invariants.md`:
+
+```markdown
+## Architecture
+- Для разработки используем только Clean Architecture
+
+## Technology Stack
+- Используем Golang версию 1.25+
+- Разрешено использование стандартной библиотеки Golang
+- Для логирования используем только log/slog. Вывод только в stdout.
+- Хранить данные можно в JSON файлах или PostgreSQL
+
+## Business Rules
+- Каждая функция должна быть прокомментирована кратким описанием
+- Для каждой функции должен быть unit-тест
+```
+
+Инварианты инжектируются во все системные промпты PLANNING и EXECUTION фаз как блок `⚑ INVARIANTS — ABSOLUTE LAW (NEVER VIOLATE)`.
+
+---
+
+## Автоматическая проверка compliance
+
+Проверка выполняется через отдельные `DirectCall`-вызовы к LLM (без истории, без памяти) на трёх уровнях:
+
+```
+Пользователь вводит задачу
+         │
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  1. TASK GATE (только итерация 1)               │
+ │  Нарушает ли задача инварианты по природе?      │
+ │  ──────────────────────────────────────────     │
+ │  VIOLATION → ⛔ Task Refused, вернуться к Task> │
+ │  COMPLIANT → продолжить                         │
+ └─────────────────────────────────────────────────┘
+         │
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  2. PLAN GATE (до 3 попыток, тихо)             │
+ │  Нарушает ли план инварианты?                   │
+ │  ──────────────────────────────────────────     │
+ │  VIOLATION (попытки 1–2) → тихий ретрай        │
+ │  VIOLATION (попытка 3)   → ⚑ Warning + план   │
+ │  COMPLIANT → показать план пользователю         │
+ └─────────────────────────────────────────────────┘
+         │ пользователь одобряет
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  3. VALIDATION GATE (авто)                      │
+ │  Нарушает ли результат выполнения инварианты?   │
+ │  ──────────────────────────────────────────     │
+ │  VIOLATION → ⚑ Violation box, авто-возврат     │
+ │              в PLANNING с targeted-fix          │
+ │  COMPLIANT → показать prompt пользователю       │
+ └─────────────────────────────────────────────────┘
+         │ пользователь принимает
+         ▼
+        DONE
+```
+
+### Уровень 1 — Task Gate
+
+Выполняется **один раз** при первом вводе задачи (итерация 1). Проверяет, не противоречит ли сам запрос пользователя инвариантам. Консервативен: отказывает только если задача **принципиально несовместима** с ограничениями.
+
+```
+Task> Реализуй REST API с использованием фреймворка Gin
+
+[invariants] checking task description for compliance...
+
+┌── ⛔ Task Refused — Conflicts with Invariants
+────────────────────────────────────────
+VIOLATION: задача явно требует использования Gin, что нарушает
+инвариант "Разрешено использование стандартной библиотеки Golang".
+────────────────────────────────────────
+
+This task cannot be executed: it conflicts with the active invariants.
+Please reformulate your request to comply with the constraints listed above.
+
+Task>
+```
+
+### Уровень 2 — Plan Gate
+
+После каждой генерации плана LLM выполняется проверка. При нарушении:
+- **Попытки 1–2**: тихий ретрай, пользователь не видит нарушающий план
+- **Попытка 3** (все попытки исчерпаны): план показывается с баннером предупреждения
+
+```
+[invariants] checking plan (attempt 1/3)...
+[invariants] plan attempt 1/3 violates constraints — retrying
+[invariants] checking plan (attempt 2/3)...
+[invariants] plan compliant
+
+┌── Proposed Plan
+────────────────────────────────────────
+1. ...
+────────────────────────────────────────
+```
+
+Если все 3 попытки нарушают инварианты:
+
+```
+┌── ⚑ Plan Compliance Warning — review required before approving
+────────────────────────────────────────
+VIOLATION: ...
+────────────────────────────────────────
+
+┌── Proposed Plan
+...
+```
+
+### Уровень 3 — Validation Gate
+
+После выполнения плана, **до** показа prompt пользователю, проверяется результат. При нарушении FSM **автоматически** возвращается в PLANNING без вмешательства пользователя:
+
+```
+[invariants] checking execution result for compliance...
+
+┌── ⚑ Invariant Compliance Check — VIOLATION DETECTED
+────────────────────────────────────────
+VIOLATION: использован пакет gin/gonic, что нарушает инвариант...
+────────────────────────────────────────
+
+[invariants] Execution result violates invariant(s) — returning to PLANNING for a targeted fix.
+
+┌─ [PLANNING]  1. PLANNING  (re-plan #2)
+```
+
+При targeted-fix replanning контекст чётко указывает что именно нужно исправить:
+> «Keep all steps that are already compliant. Fix ONLY the step(s) responsible for the violation.»
+
+---
+
+## Slash-команды
+
+Работают на **любом** пользовательском prompt внутри FSM:
+
+| Команда | Действие |
+|---|---|
+| `/exit` или `exit` | Завершить агент с сообщением "Goodbye!" |
+| `/restart` | Удалить текущую задачу, вернуться к `Task>` |
+| `/pause` или `pause` | Сохранить состояние и приостановить |
+| `/resume` или `resume` | Возобновить приостановленную задачу (на `Task>`) |
+
+```
+╔══════════════════════════════════════╗
+║   Interactive Agent  —  Day 14       ║
+║   Phases: planning → execution →     ║
+║           validation → done          ║
+╠══════════════════════════════════════╣
+║  /exit     — quit the agent          ║
+║  /restart  — discard task, start over║
+║  /resume   — resume a paused task    ║
+║  /pause    — suspend at any prompt   ║
+╚══════════════════════════════════════╝
+```
+
+---
+
+## Машина состояний (FSM)
 
 ```
   ┌─────────┐   approve    ┌───────────┐   auto     ┌────────────┐   accept   ┌──────┐
   │PLANNING │ ──────────► │ EXECUTION │ ─────────► │ VALIDATION │ ─────────► │ DONE │
   └─────────┘             └───────────┘            └────────────┘            └──────┘
-       ▲                                                   │ reject
-       └───────────────────────────────────────────────────┘
+       ▲                                                   │ violation (auto)
+       └───────────────────────────────────────────────────┘  or user reject
 ```
 
 | Фаза | Что происходит | Пользователь |
 |---|---|---|
-| **PLANNING** | LLM предлагает пошаговый план | `y` — одобрить, `pause` — приостановить, любой текст — отклонить с фидбэком |
-| **EXECUTION** | LLM выполняет план (до 120 с) | После появления результата: `y` — перейти к валидации, `pause` — приостановить |
-| **VALIDATION** | Пользователь проверяет результат | `y` — принять, `pause` — приостановить, любой текст — отклонить, вернуться к планированию |
+| **PLANNING** | Task Gate → Plan Gate (авто) → показ плана | `y` — одобрить, `/pause`, `/restart`, `/exit`, любой текст — отклонить с фидбэком |
+| **EXECUTION** | LLM выполняет план (до 120 с) | После результата: `y` — к валидации, `/pause` |
+| **VALIDATION** | Validation Gate (авто) → prompt | `y` — принять, `/pause`, любой текст — отклонить, вернуться к планированию |
 | **DONE** | Задача завершена, состояние очищается | — |
-
-### Пауза и возобновление
-
-На любом пользовательском prompt можно ввести `pause` — агент сохранит текущее состояние на диск и завершится. При следующем запуске с тем же `--history` агент обнаружит сохранённое состояние и предложит продолжить.
-
-```
-[PAUSED TASK FOUND]
-  Phase:     planning
-  Iteration: 1
-  Task:      Написать REST API на Go
-Resume paused task? [y/yes | any other key to discard]
-> y
-[resuming] phase=planning  iteration=1
-```
-
-**Как поставить паузу на каждой фазе:**
-
-- **PLANNING** — появляется подсказка после плана:
-  ```
-  Approve this plan? [y/yes = approve | "pause" = suspend | any other text = revise]
-  > pause
-  ```
-- **EXECUTION** — LLM работает молча (блокирующий вызов). Пауза доступна **после** того как результат появился на экране:
-  ```
-  Continue to validation? [y/yes = proceed | "pause" = suspend]
-  > pause
-  ```
-- **VALIDATION** — появляется подсказка после результата:
-  ```
-  Validate this result? [y/yes = accept | "pause" = suspend | any other text = reject]
-  > pause
-  ```
-
-Состояние сохраняется в файл `<history>.task.json`. При отклонении плана или результата старый результат автоматически сбрасывается, и EXECUTION делает новый вызов к LLM с учётом фидбэка.
-
-### Команды на основном prompt
-
-```
-Task> <текст задачи>   — начать новую задачу
-Task> resume           — возобновить приостановленную задачу
-Task> exit / quit      — завершить агент
-```
 
 ---
 
-## Профиль пользователя
+## Отображение статусов при старте
 
-Профиль (`--profile`) инжектируется как первый блок системного сообщения в каждый LLM-вызов — и в CLI-, и в интерактивном режиме. Хранится в `.md`-файле, читается и редактируется вручную.
+При запуске агент выводит пути всех файлов и статус загрузки каждого слоя памяти:
 
 ```
-[User Profile]
-Name: Andrey
-language: russian
-style: concise
-format: markdown
-expertise: golang-developer
-```
+[session] Memory file paths:
+  STM  (history)   : /tmp/agent_session_day14.json
+  WM   (working)   : /tmp/agent_session_day14.wm.json
+  LTM  (long-term) : /tmp/agent_session_day14.ltm.json
+  Profile          : /tmp/agent_profile_day14.md
+  Invariants       : invariants.md
+  Task state       : /tmp/agent_session_day14.task.json
 
-### Управление профилем
-
-```bash
-# Интерактивная инициализация (диалог в терминале)
-./ai-adv-agent-day13 --profile my.md --profile-init
-
-# Установить имя и выйти
-./ai-adv-agent-day13 --profile my.md --profile-name "Andrey"
-
-# Установить/обновить одно или несколько предпочтений
-./ai-adv-agent-day13 --profile my.md \
-    --profile-set "language=russian" \
-    --profile-set "style=concise"
-
-# Удалить предпочтение
-./ai-adv-agent-day13 --profile my.md --profile-delete "constraints"
-
-# Просмотреть текущий профиль
-./ai-adv-agent-day13 --profile my.md --profile-list
+[memory] profile: loaded (5 items)
+[memory] WM: 3 facts loaded
+[memory] LTM: empty
+[memory] invariants: active (512 bytes)
 ```
 
 ---
@@ -130,7 +239,7 @@ expertise: golang-developer
 --interactive     Запустить интерактивный режим с машиной состояний
 
 # Общие
---system          Системное сообщение (опционально)
+--system          Системное сообщение (добавляется к фазовым промптам FSM)
 --format          markdown | json (умолч. markdown)
 --format-hint     Кастомная инструкция форматирования
 --max-tokens      Лимит токенов ответа (0 = без лимита)
@@ -139,6 +248,9 @@ expertise: golang-developer
 --debug           Вывод JSON-payload в stderr
 --show-tokens     Вывод разбивки токенов в stderr
 --show-cost       Вывод оценки стоимости (подразумевает --show-tokens)
+
+# Инварианты (Day14)
+--invariants      Путь к файлу инвариантов (.md; умолч. <history>.invariants.md)
 
 # Layer 1 — STM (история диалога)
 --history         Путь к файлу истории (умолч. chat_history.json; "" = отключено)
@@ -178,54 +290,62 @@ expertise: golang-developer
 
 ## Примеры использования
 
-### Интерактивный режим
+### Запуск с инвариантами
 
 ```bash
 # Создать профиль (первый раз)
-make run-profile-init PROFILE_FILE=/tmp/my.md
+make run-profile-init PROFILE_FILE=my.md
 
-# Запустить агент (профиль обязателен)
-make run-interactive AGENT_PROFILE_FILE=/tmp/my.md
+# Запустить агент с инвариантами
+make run-interactive \
+    AGENT_PROFILE_FILE=profile_go.md \
+    INVARIANTS_FILE=invariants.md
 
-# Свежая сессия для ручного тестирования (история и задача сбрасываются)
-make run-interactive-manual INTERACTIVE_PROFILE_FILE=/tmp/my.md
+# Свежая сессия для ручного тестирования
+make run-interactive-manual \
+    INTERACTIVE_PROFILE_FILE=profile_go.md \
+    INVARIANTS_FILE=invariants.md
 ```
 
-Пример сессии:
+### Пример сессии с compliance
 
 ```
 ╔══════════════════════════════════════╗
-║   Interactive Agent  —  Day 13       ║
-║   Phases: planning → execution →     ║
-║           validation → done          ║
+║   Interactive Agent  —  Day 14       ║
+...
 ╚══════════════════════════════════════╝
 
-Task> Написать функцию на Go, которая форматирует байты в человекочитаемый вид
+[memory] profile: loaded (4 items)
+[memory] WM: empty
+[memory] invariants: active (487 bytes)
+
+Task> Написать HTTP-сервер на Go с логгером
+
+[invariants] checking task description for compliance...
 
 ┌─ [PLANNING] 1. PLANNING
+[invariants] checking plan (attempt 1/3)...
+[invariants] plan compliant
+
 ┌── Proposed Plan
 ────────────────────────────────────────
-1. Определить пороговые значения (B, KB, MB, GB, TB)
-2. Реализовать функцию FormatBytes(n uint64) string
-3. Написать тест-таблицу для крайних случаев
+1. Создать пакет main с HTTP-сервером на net/http
+2. Подключить log/slog для структурированного логирования
+3. Реализовать handler /health
+4. Добавить unit-тест для handler
 ────────────────────────────────────────
 
-Approve this plan? [y/yes = approve | "pause" = suspend | any other text = revise]
+Approve this plan? [y/yes = approve | /pause | /restart | /exit | text = revise]
 > y
 
 ┌─ [EXECUTION] 2. EXECUTION
-
-┌── Execution Result
-────────────────────────────────────────
-func FormatBytes(n uint64) string { ... }
-────────────────────────────────────────
-
-Continue to validation? [y/yes = proceed | "pause" = suspend]
-> y
+...
 
 ┌─ [VALIDATION] 3. VALIDATION
+[invariants] checking execution result for compliance...
+[invariants] compliance check passed
 
-Validate this result? [y/yes = accept | "pause" = suspend | any other text = reject]
+Validate this result? [y/yes = accept | /pause | /restart | /exit | text = reject]
 > y
 
 ┌─ [DONE] 4. DONE
@@ -235,11 +355,9 @@ Task completed after 1 planning iteration(s).
 ### CLI-режим (без изменений)
 
 ```bash
-# Разовый вопрос
-./ai-adv-agent-day13 --query "Что такое goroutine?"
+./ai-adv-agent-day14 --query "Что такое goroutine?"
 
-# С историей и профилем
-./ai-adv-agent-day13 \
+./ai-adv-agent-day14 \
   --query "Следующий шаг?" \
   --history session.json \
   --profile my.md \
@@ -256,12 +374,12 @@ Task completed after 1 planning iteration(s).
 | `chat_history.wm.json` | WM — рабочая память (Layer 2) | При `--memory-update` |
 | `chat_history.ltm.json` | LTM — долгосрочная память (Layer 3) | При `--memory-update` |
 | `chat_history.profile.md` | Профиль пользователя | При `--profile-init` / `--profile-name` / `--profile-set` |
+| `chat_history.invariants.md` | Инварианты | Создаётся вручную; путь задаётся `--invariants` |
 | `chat_history.task.json` | Состояние задачи FSM | В интерактивном режиме; удаляется по завершении задачи |
 | `chat_history.stats.json` | Накопленная статистика токенов | При `--show-tokens` / `--show-cost` |
 | `chat_history.summary.txt` | Суммаризация истории | При `--summary` + переполнении |
 | `chat_history.facts.json` | KV-факты sticky-facts | При `--strategy sticky-facts` |
 | `chat_history.branch-state.json` | Состояние веток | При `--strategy branching` |
-| `chat_history.branch-<name>.json` | История конкретной ветки | При создании ветки |
 
 Все пути выводятся из `--history`. Каждый можно переопределить явным флагом.
 
@@ -300,7 +418,8 @@ Task completed after 1 planning iteration(s).
        │  LLMClient, HistoryRepository,          │
        │  StatsRepository, WMRepository,         │
        │  LTMRepository, BranchRepository,       │
-       │  ProfileRepository, TaskRepository      │
+       │  ProfileRepository, TaskRepository,     │
+       │  InvariantsRepository                   │
        └────────────▲────────────────────────────┘
                     │ реализует
        ┌────────────┴────────────────────────────┐
@@ -318,31 +437,36 @@ Task completed after 1 planning iteration(s).
        └─────────────────────────────────────────┘
 ```
 
-### Машина состояний задачи (Day13)
+### Pipeline compliance-проверок (Day14)
 
-```go
-// internal/domain/task.go
-type TaskPhase string  // "planning" | "execution" | "validation" | "done"
+Каждая проверка использует `DirectCall` — прямой вызов к LLM без истории, памяти и статистики. Три разных system prompt для трёх разных задач:
 
-type TaskState struct {
-    ID, Task, Plan, Result  string
-    Phase                   TaskPhase
-    Iteration               int    // увеличивается при каждом новом туре планирования
-    PendingFeedback         string // сохраняется при паузе, восстанавливается при resume
-    CreatedAt, UpdatedAt    string
-}
+| Функция | Prompt | Что проверяет | Когда |
+|---|---|---|---|
+| `checkTaskDescription` | "inherently requires violating..." | Задача пользователя | Итерация 1, до планирования |
+| `checkPlanCompliance` | "steps that would violate..." | Предложенный план | После каждой генерации плана |
+| `checkInvariantsCompliance` | "execution result violates..." | Результат выполнения | После execution, до user prompt |
+
+Все три возвращают либо `COMPLIANT`, либо `VIOLATION: <описание>`.
+
+### FSM + слои памяти (Day14)
+
+```
+Системное сообщение = Profile + LTM + WM + Phase prompt + --system flag
+                                                             ▲
+                                           withDomainContext() добавляет сюда
 ```
 
-Переходы: `planning→execution`, `execution→validation`, `validation→done`, `validation→planning` (отклонение). При переходе `validation→planning` `ts.Result` сбрасывается, чтобы EXECUTION сделал новый LLM-вызов с переработанным планом.
+Флаг `--system` приписывается к каждому фазовому промпту через `withDomainContext`, а не заменяет его.
 
 ---
 
 ## Сборка и тесты
 
 ```bash
-cd Day13
+cd Day14
 
-go build -o ai-adv-agent-day13 .   # или: make build
+go build -o ai-adv-agent-day14 .   # или: make build
 go test -v ./...                    # или: make test
 go vet ./...                        # или: make vet
 ```
@@ -351,10 +475,10 @@ go vet ./...                        # или: make vet
 
 | Пакет | Что тестируется |
 |---|---|
-| `internal/domain` | `TaskState` FSM, переходы, `RetryPlanning`; ценообразование, токены, `ContextStatus` |
-| `internal/usecase` | `AgentUseCase` FSM (happy path, все 3 точки паузы, resume, reject+re-plan, очистка результата); `ChatUseCase`, `ProfileUseCase`, `HistoryUseCase` |
+| `internal/domain` | `TaskState` FSM, переходы, `RetryPlanning`; ценообразование, токены |
+| `internal/usecase` | `AgentUseCase`: happy path, все 3 точки паузы, resume, reject+re-plan; task gate (отказ/пропуск); plan compliance (compliant/silent-retry/all-fail); validation compliance (violation→replan, pass→user); slash-команды `/exit` и `/restart` на всех фазах; memory layer injection; `--system` preservation; `ChatUseCase`, `ProfileUseCase`, `HistoryUseCase` |
 | `internal/adapter/llm` | HTTP-payload (токены, stop, temperature, system message) |
-| `internal/adapter/storage` | Path-хелперы, Load/Save для всех 8 типов репозиториев |
+| `internal/adapter/storage` | Path-хелперы, Load/Save для всех репозиториев включая `InvariantsRepository` |
 
 ---
 
@@ -363,38 +487,44 @@ go vet ./...                        # или: make vet
 ### Интерактивный режим
 
 ```bash
-# Ручной запуск (профиль обязателен)
-make run-interactive AGENT_PROFILE_FILE=/tmp/my.md
+# Ручной запуск (профиль обязателен; инварианты опциональны)
+make run-interactive \
+    AGENT_PROFILE_FILE=profile_go.md \
+    INVARIANTS_FILE=invariants.md
 
 # Свежая сессия для ручного тестирования
-make run-interactive-manual INTERACTIVE_PROFILE_FILE=/tmp/my.md
+make run-interactive-manual \
+    INTERACTIVE_PROFILE_FILE=profile_go.md \
+    INVARIANTS_FILE=invariants.md
 
-# Автоматические интеграционные тесты (pipe stdin, профиль создаётся автоматически)
+# Автоматические интеграционные тесты
 make run-interactive-test-happy           # happy path: все 4 фазы до DONE
 make run-interactive-test-pause-resume    # пауза на PLANNING, resume, завершение
 make run-interactive-test                 # запустить оба теста
 ```
 
+### Инварианты
+
+```bash
+# Показать/инициализировать файл инвариантов
+make run-invariants-show INVARIANTS_FILE=invariants.md
+make run-invariants-init INVARIANTS_FILE=invariants.md
+```
+
 ### Профиль пользователя
 
 ```bash
-make run-profile-init        PROFILE_FILE=my.md   # диалог инициализации
-make run-profile-set         PROFILE_FILE=my.md   # установить имя + пример предпочтений
-make run-profile-list        PROFILE_FILE=my.md   # вывести текущий профиль
+make run-profile-init        PROFILE_FILE=my.md
+make run-profile-set         PROFILE_FILE=my.md
+make run-profile-list        PROFILE_FILE=my.md
 make run-profile-delete  KEY=constraints PROFILE_FILE=my.md
-make run-profile-demo                             # создать профиль + запрос + проверить инъекцию
+make run-profile-demo
 
 # Профильные интеграционные сценарии (WM + LTM + Profile)
 make run-profile-go-dev      # Andrey — Golang/Telegram-bot, все 4 слоя памяти
 make run-profile-ai-critic   # Maria  — AI-критик, все 4 слоя памяти
 make run-profile-data-sci    # Alex   — ML-эксперимент, все 4 слоя памяти
 make run-profile-all         # запустить все три последовательно
-
-# Profile-Only (без WM/LTM)
-make run-profile-only-go-dev
-make run-profile-only-ai-critic
-make run-profile-only-data-sci
-make run-profile-only-all
 ```
 
 ### 3-слойная память
