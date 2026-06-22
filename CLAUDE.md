@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is an "AI Advent Challenge" — a series of incremental daily Go exercises (Day1–Day12), each building a more capable CLI tool for querying LLM APIs. Every day is an **independent Go module** with its own `go.mod`, binary, and `Makefile`.
+This is an "AI Advent Challenge" — a series of incremental daily Go exercises (Day1–Day15), each building a more capable CLI tool for querying LLM APIs. Every day is an **independent Go module** with its own `go.mod`, binary, and `Makefile`.
 
 Starting from Day11 the code is structured using **Clean Architecture** with packages under `internal/` (`domain`, `port`, `adapter`, `usecase`).
 
@@ -54,7 +54,10 @@ Each day extends the previous by adding one capability:
 - **Day9** — Adds `--history-limit` and auto-summarization: when history exceeds the limit, older messages are summarized by the LLM and stored in `<history>.summary.txt`, which is injected back as a system message prefix.
 - **Day10** — Adds three context management strategies (`--strategy`): `sliding-window` (keep last N messages), `sticky-facts` (KV facts store survives window rotation), `branching` (independent conversation branches with named checkpoints). Branch management flags: `--checkpoint`, `--branch-new`, `--from-checkpoint`, `--branch-switch`, `--branch-list`.
 - **Day11** — Adds a 3-layer memory system and refactors to **Clean Architecture** (`internal/domain`, `internal/port`, `internal/adapter/llm`, `internal/adapter/storage`, `internal/usecase`). New flags: `--memory-wm` (Layer 2: working memory / task facts), `--memory-ltm` (Layer 3: long-term memory / profile), `--memory-update` (auto-update WM+LTM after each call via 2 extra LLM calls). Memory layers inject their content as system-message prefixes.
-- **Day12** — Copy of Day11 as the base for the next incremental feature (in progress).
+- **Day12** — Adds user profile management (`--profile`, `--profile-init`, `--profile-name`, `--profile-set`, `--profile-delete`, `--profile-list`). Profile is a Markdown file injected as the top layer of every system message.
+- **Day13** — Adds interactive mode (`--interactive`) with a 4-phase task state machine (Planning → Execution → Validation → Done). Full pause/resume support: state is persisted to `<history>.task.json`; the task can be resumed across restarts.
+- **Day14** — Adds invariant enforcement (`--invariants`). Invariants are absolute constraints loaded from a Markdown file and injected into every Planning and Execution system prompt. Three automatic compliance gates: Task Gate (task description check on iteration 1), Plan Gate (up to 3 silent retries before showing a warning), Validation Gate (auto-return to Planning on violation). Slash commands `/exit`, `/restart`, `/pause` work at any FSM prompt.
+- **Day15** — Replaces `y`/`yes` approvals with `/yes`-only review prompts (`reviewPrompt()`) at all FSM gates (Planning, Execution continue, Validation, startup resume). Adds `PendingPlan` field: plan is persisted before being shown to the user so resume after a pause restores the exact same plan without an LLM re-call. Upgrades compliance checking to chain-of-thought: the checker LLM must analyse each invariant individually before writing a final `COMPLIANT` / `VIOLATION:` verdict on the last line; the parser reads only that last line, preventing mid-analysis text from masking a violation.
 
 ### Memory Layer Architecture (Day11+)
 

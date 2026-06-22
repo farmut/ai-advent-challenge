@@ -1,8 +1,8 @@
-# Day 14: Interactive Agent with Invariant Enforcement
+# Day 15: Review Prompts, PendingPlan и Chain-of-Thought Compliance
 
-Расширение Day13. Добавлена система **инвариантов** — абсолютных ограничений, которые агент обязан соблюдать на каждом этапе работы. Инварианты проверяются автоматически на трёх уровнях до того, как пользователь что-либо увидит. Также добавлены **slash-команды** (`/exit`, `/restart`, `/pause`) и улучшено управление сессией.
+Расширение Day14. Три улучшения надёжности: единый механизм подтверждения `/yes` на всех точках FSM, сохранение плана до показа пользователю, и chain-of-thought при проверке инвариантов.
 
-## Что нового в Day14
+## Что нового в Day15
 
 | Возможность | День появления |
 |---|---|
@@ -16,171 +16,38 @@
 | 3-слойная память: WM + LTM + Clean Architecture | Day11 |
 | Профиль пользователя (`--profile`) | Day12 |
 | Интерактивный режим, FSM, пауза/возобновление | Day13 |
-| **Инварианты (`--invariants`)** | **Day14** |
-| **Автоматическая проверка compliance на 3 уровнях** | **Day14** |
-| **Slash-команды `/exit` `/restart` `/pause`** | **Day14** |
-| **Вывод путей файлов и статусов памяти при старте** | **Day14** |
+| Инварианты (`--invariants`), 3 compliance-gate | Day14 |
+| Slash-команды `/exit` `/restart` `/pause` | Day14 |
+| **`/yes`-only review prompts на всех gate'ах FSM** | **Day15** |
+| **`PendingPlan`: план сохраняется до одобрения** | **Day15** |
+| **Chain-of-thought compliance + парсер последней строки** | **Day15** |
 
 ---
 
-## Система инвариантов
+## `/yes`-only review prompts
 
-Инварианты — это абсолютные ограничения, которые агент **никогда не должен нарушать**: технологический стек, архитектурные правила, бизнес-требования. Они задаются в Markdown-файле и передаются флагом `--invariants`.
+До Day15 разные точки FSM использовали разные функции подтверждения: Planning и Validation принимали `/yes`, а Execution continue и стартовый prompt «Resume paused task?» принимали `y`/`yes`. Это создавало несогласованный интерфейс.
 
-```bash
-./ai-adv-agent-day14 --interactive --invariants invariants.md --profile my.md
-```
+В Day15 все точки переведены на единый `reviewPrompt()`:
 
-Пример файла `invariants.md`:
-
-```markdown
-## Architecture
-- Для разработки используем только Clean Architecture
-
-## Technology Stack
-- Используем Golang версию 1.25+
-- Разрешено использование стандартной библиотеки Golang
-- Для логирования используем только log/slog. Вывод только в stdout.
-- Хранить данные можно в JSON файлах или PostgreSQL
-
-## Business Rules
-- Каждая функция должна быть прокомментирована кратким описанием
-- Для каждой функции должен быть unit-тест
-```
-
-Инварианты инжектируются во все системные промпты PLANNING и EXECUTION фаз как блок `⚑ INVARIANTS — ABSOLUTE LAW (NEVER VIOLATE)`.
-
----
-
-## Автоматическая проверка compliance
-
-Проверка выполняется через отдельные `DirectCall`-вызовы к LLM (без истории, без памяти) на трёх уровнях:
-
-```
-Пользователь вводит задачу
-         │
-         ▼
- ┌─────────────────────────────────────────────────┐
- │  1. TASK GATE (только итерация 1)               │
- │  Нарушает ли задача инварианты по природе?      │
- │  ──────────────────────────────────────────     │
- │  VIOLATION → ⛔ Task Refused, вернуться к Task> │
- │  COMPLIANT → продолжить                         │
- └─────────────────────────────────────────────────┘
-         │
-         ▼
- ┌─────────────────────────────────────────────────┐
- │  2. PLAN GATE (до 3 попыток, тихо)             │
- │  Нарушает ли план инварианты?                   │
- │  ──────────────────────────────────────────     │
- │  VIOLATION (попытки 1–2) → тихий ретрай        │
- │  VIOLATION (попытка 3)   → ⚑ Warning + план   │
- │  COMPLIANT → показать план пользователю         │
- └─────────────────────────────────────────────────┘
-         │ пользователь одобряет
-         ▼
- ┌─────────────────────────────────────────────────┐
- │  3. VALIDATION GATE (авто)                      │
- │  Нарушает ли результат выполнения инварианты?   │
- │  ──────────────────────────────────────────     │
- │  VIOLATION → ⚑ Violation box, авто-возврат     │
- │              в PLANNING с targeted-fix          │
- │  COMPLIANT → показать prompt пользователю       │
- └─────────────────────────────────────────────────┘
-         │ пользователь принимает
-         ▼
-        DONE
-```
-
-### Уровень 1 — Task Gate
-
-Выполняется **один раз** при первом вводе задачи (итерация 1). Проверяет, не противоречит ли сам запрос пользователя инвариантам. Консервативен: отказывает только если задача **принципиально несовместима** с ограничениями.
-
-```
-Task> Реализуй REST API с использованием фреймворка Gin
-
-[invariants] checking task description for compliance...
-
-┌── ⛔ Task Refused — Conflicts with Invariants
-────────────────────────────────────────
-VIOLATION: задача явно требует использования Gin, что нарушает
-инвариант "Разрешено использование стандартной библиотеки Golang".
-────────────────────────────────────────
-
-This task cannot be executed: it conflicts with the active invariants.
-Please reformulate your request to comply with the constraints listed above.
-
-Task>
-```
-
-### Уровень 2 — Plan Gate
-
-После каждой генерации плана LLM выполняется проверка. При нарушении:
-- **Попытки 1–2**: тихий ретрай, пользователь не видит нарушающий план
-- **Попытка 3** (все попытки исчерпаны): план показывается с баннером предупреждения
-
-```
-[invariants] checking plan (attempt 1/3)...
-[invariants] plan attempt 1/3 violates constraints — retrying
-[invariants] checking plan (attempt 2/3)...
-[invariants] plan compliant
-
-┌── Proposed Plan
-────────────────────────────────────────
-1. ...
-────────────────────────────────────────
-```
-
-Если все 3 попытки нарушают инварианты:
-
-```
-┌── ⚑ Plan Compliance Warning — review required before approving
-────────────────────────────────────────
-VIOLATION: ...
-────────────────────────────────────────
-
-┌── Proposed Plan
-...
-```
-
-### Уровень 3 — Validation Gate
-
-После выполнения плана, **до** показа prompt пользователю, проверяется результат. При нарушении FSM **автоматически** возвращается в PLANNING без вмешательства пользователя:
-
-```
-[invariants] checking execution result for compliance...
-
-┌── ⚑ Invariant Compliance Check — VIOLATION DETECTED
-────────────────────────────────────────
-VIOLATION: использован пакет gin/gonic, что нарушает инвариант...
-────────────────────────────────────────
-
-[invariants] Execution result violates invariant(s) — returning to PLANNING for a targeted fix.
-
-┌─ [PLANNING]  1. PLANNING  (re-plan #2)
-```
-
-При targeted-fix replanning контекст чётко указывает что именно нужно исправить:
-> «Keep all steps that are already compliant. Fix ONLY the step(s) responsible for the violation.»
-
----
-
-## Slash-команды
-
-Работают на **любом** пользовательском prompt внутри FSM:
-
-| Команда | Действие |
-|---|---|
-| `/exit` или `exit` | Завершить агент с сообщением "Goodbye!" |
-| `/restart` | Удалить текущую задачу, вернуться к `Task>` |
-| `/pause` или `pause` | Сохранить состояние и приостановить |
-| `/resume` или `resume` | Возобновить приостановленную задачу (на `Task>`) |
+| Точка FSM | Подтверждение | Пауза | Отклонение |
+|---|---|---|---|
+| Старт: «Resume paused task?» | `/yes` | Enter / `/no` | Enter / `/no` |
+| Planning: «Approve this plan?» | `/yes` | Enter | `/no` или текст фидбэка |
+| Execution: «Continue to validation?» | `/yes` | Enter / любой ввод | Enter / любой ввод |
+| Validation: «Validate this result?» | `/yes` | Enter | `/no` или текст фидбэка |
 
 ```
 ╔══════════════════════════════════════╗
-║   Interactive Agent  —  Day 14       ║
+║   Interactive Agent  —  Day 15       ║
 ║   Phases: planning → execution →     ║
 ║           validation → done          ║
+╠══════════════════════════════════════╣
+║  All review prompts:                 ║
+║    /yes  — approve / proceed         ║
+║    /no   — reject without comment    ║
+║    text  — revision comment          ║
+║    Enter — pause                     ║
 ╠══════════════════════════════════════╣
 ║  /exit     — quit the agent          ║
 ║  /restart  — discard task, start over║
@@ -189,45 +56,167 @@ VIOLATION: использован пакет gin/gonic, что нарушает 
 ╚══════════════════════════════════════╝
 ```
 
+### Поведение при разных вводах
+
+**Planning / Validation** (`reviewPrompt`):
+
+| Ввод | Результат |
+|---|---|
+| `/yes` | Одобрить → следующая фаза |
+| `/no` | Отклонить без комментария → переплан |
+| Текст | Текст фидбэка → переплан с комментарием |
+| Enter (пусто) | Пауза, состояние сохраняется |
+| `/exit` | Завершить агент |
+| `/restart` | Удалить задачу, вернуться к `Task>` |
+
+**Execution continue / Resume prompt**:
+
+| Ввод | Результат |
+|---|---|
+| `/yes` | Перейти к следующей фазе |
+| Всё остальное | Пауза |
+
+---
+
+## PendingPlan: план сохраняется до одобрения
+
+### Проблема (Day14)
+
+При паузе на этапе review плана FSM сохранял состояние с `Phase=planning`. При возобновлении агент заново вызывал LLM и генерировал **новый план**, хотя пользователь ожидал увидеть тот же.
+
+### Решение (Day15)
+
+Добавлено поле `PendingPlan` в `TaskState`. Логика:
+
+```
+LLM генерирует план
+      │
+      ▼
+ts.PendingPlan = planContent   ← сохранить ДО показа пользователю
+_ = a.task.Save(ts)
+      │
+      ▼
+показать план пользователю
+      │
+      ├── /yes → ts.Plan = planContent; ts.PendingPlan = ""   ← одобрен
+      ├── /no  → ts.PendingPlan = ""                          ← отклонён, переплан
+      └── Enter → ts сохраняется с PendingPlan != ""          ← пауза
+                  return ErrTaskPaused
+
+при resumeTask:
+      if ts.PendingPlan != "" → восстановить план, пропустить LLM-вызов
+```
+
+```json
+// Пример сохранённого состояния при паузе на review
+{
+  "phase": "planning",
+  "pending_plan": "1. Создать структуру...\n2. Реализовать...",
+  "pending_feedback": ""
+}
+```
+
+---
+
+## Chain-of-thought compliance
+
+### Проблема (Day14)
+
+LLM-чекер возвращал вердикт одной строкой. При этом:
+1. Модель делала поверхностную проверку и могла доверять само-декларациям плана («## Invariant Compliance: всё хорошо»).
+2. Новые промпты с инструкцией «HOW TO CHECK» заставляли LLM писать аналитику **перед** вердиктом, а парсер проверял только **префикс** всего ответа — вердикт оказывался в конце и игнорировался.
+
+### Решение (Day15)
+
+**Промпты** теперь требуют структурированного разбора:
+
+```
+Work through EVERY invariant above one by one. For each one write:
+
+CHECKING: <copy the invariant text exactly>
+EVIDENCE: <what you observe in the result that relates to this invariant>
+STATUS: PASS  — or —  FAIL: <quote the specific element that violates it>
+
+After ALL checks, write the final verdict as the very last line:
+COMPLIANT
+or
+VIOLATION: <for each FAIL: quote invariant, quote violating element, explain>
+```
+
+**Парсер** (`runComplianceCheck`) теперь читает **последнюю непустую строку**, а не весь префикс:
+
+```go
+// До (Day14): проверяет начало всего ответа
+if strings.HasPrefix(strings.ToUpper(answer), "VIOLATION") { ... }
+
+// После (Day15): читает только финальный вердикт
+lines := strings.Split(strings.TrimSpace(answer), "\n")
+verdict := ""
+for i := len(lines) - 1; i >= 0; i-- {
+    if line := strings.TrimSpace(lines[i]); line != "" {
+        verdict = line; break
+    }
+}
+if strings.HasPrefix(strings.ToUpper(verdict), "VIOLATION") { ... }
+```
+
+Это устраняет ложные срабатывания когда слово «VIOLATION» встречается в аналитической части ответа, и ложные «COMPLIANT» когда вердикт оказывался не в начале.
+
+---
+
+## Автоматическая проверка compliance (унаследовано от Day14, улучшено в Day15)
+
+```
+Пользователь вводит задачу
+         │
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  1. TASK GATE (только итерация 1)               │
+ │  Нарушает ли задача инварианты по природе?      │
+ │  VIOLATION → ⛔ Task Refused, вернуться к Task> │
+ │  COMPLIANT → продолжить                         │
+ └─────────────────────────────────────────────────┘
+         │
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  2. PLAN GATE (до 3 попыток, тихо)             │
+ │  VIOLATION (попытки 1–2) → тихий ретрай        │
+ │  VIOLATION (попытка 3)   → ⚑ Warning + план   │
+ │  COMPLIANT → показать план → /yes для одобрения│
+ └─────────────────────────────────────────────────┘
+         │ /yes
+         ▼
+ ┌─────────────────────────────────────────────────┐
+ │  3. VALIDATION GATE (авто)                      │
+ │  VIOLATION → ⚑ Violation box, авто-возврат     │
+ │              в PLANNING с targeted-fix          │
+ │  COMPLIANT → показать prompt → /yes для приёма │
+ └─────────────────────────────────────────────────┘
+         │ /yes
+         ▼
+        DONE
+```
+
+Каждая проверка — отдельный `DirectCall` к LLM (без истории, без памяти, только system prompt + инварианты + проверяемый контент). Вердикт — последняя строка ответа.
+
 ---
 
 ## Машина состояний (FSM)
 
 ```
-  ┌─────────┐   approve    ┌───────────┐   auto     ┌────────────┐   accept   ┌──────┐
-  │PLANNING │ ──────────► │ EXECUTION │ ─────────► │ VALIDATION │ ─────────► │ DONE │
-  └─────────┘             └───────────┘            └────────────┘            └──────┘
-       ▲                                                   │ violation (auto)
-       └───────────────────────────────────────────────────┘  or user reject
+  ┌─────────┐  /yes    ┌───────────┐  /yes    ┌────────────┐  /yes  ┌──────┐
+  │PLANNING │ ───────► │ EXECUTION │ ───────► │ VALIDATION │ ─────► │ DONE │
+  └─────────┘          └───────────┘          └────────────┘        └──────┘
+       ▲                                              │ violation (авто)
+       └──────────────────────────────────────────────┘  или /no / текст
 ```
 
 | Фаза | Что происходит | Пользователь |
 |---|---|---|
-| **PLANNING** | Task Gate → Plan Gate (авто) → показ плана | `y` — одобрить, `/pause`, `/restart`, `/exit`, любой текст — отклонить с фидбэком |
-| **EXECUTION** | LLM выполняет план (до 120 с) | После результата: `y` — к валидации, `/pause` |
-| **VALIDATION** | Validation Gate (авто) → prompt | `y` — принять, `/pause`, любой текст — отклонить, вернуться к планированию |
+| **PLANNING** | Task Gate → Plan Gate (авто) → показ плана | `/yes` — одобрить; `/no` — переплан; текст — переплан с фидбэком; Enter — пауза |
+| **EXECUTION** | LLM выполняет план | После результата: `/yes` — к валидации; всё остальное — пауза |
+| **VALIDATION** | Validation Gate (авто) → prompt | `/yes` — принять; `/no` — переплан без комментария; текст — переплан с фидбэком; Enter — пауза |
 | **DONE** | Задача завершена, состояние очищается | — |
-
----
-
-## Отображение статусов при старте
-
-При запуске агент выводит пути всех файлов и статус загрузки каждого слоя памяти:
-
-```
-[session] Memory file paths:
-  STM  (history)   : /tmp/agent_session_day14.json
-  WM   (working)   : /tmp/agent_session_day14.wm.json
-  LTM  (long-term) : /tmp/agent_session_day14.ltm.json
-  Profile          : /tmp/agent_profile_day14.md
-  Invariants       : invariants.md
-  Task state       : /tmp/agent_session_day14.task.json
-
-[memory] profile: loaded (5 items)
-[memory] WM: 3 facts loaded
-[memory] LTM: empty
-[memory] invariants: active (512 bytes)
-```
 
 ---
 
@@ -249,7 +238,7 @@ VIOLATION: использован пакет gin/gonic, что нарушает 
 --show-tokens     Вывод разбивки токенов в stderr
 --show-cost       Вывод оценки стоимости (подразумевает --show-tokens)
 
-# Инварианты (Day14)
+# Инварианты
 --invariants      Путь к файлу инвариантов (.md; умолч. <history>.invariants.md)
 
 # Layer 1 — STM (история диалога)
@@ -288,84 +277,6 @@ VIOLATION: использован пакет gin/gonic, что нарушает 
 
 ---
 
-## Примеры использования
-
-### Запуск с инвариантами
-
-```bash
-# Создать профиль (первый раз)
-make run-profile-init PROFILE_FILE=my.md
-
-# Запустить агент с инвариантами
-make run-interactive \
-    AGENT_PROFILE_FILE=profile_go.md \
-    INVARIANTS_FILE=invariants.md
-
-# Свежая сессия для ручного тестирования
-make run-interactive-manual \
-    INTERACTIVE_PROFILE_FILE=profile_go.md \
-    INVARIANTS_FILE=invariants.md
-```
-
-### Пример сессии с compliance
-
-```
-╔══════════════════════════════════════╗
-║   Interactive Agent  —  Day 14       ║
-...
-╚══════════════════════════════════════╝
-
-[memory] profile: loaded (4 items)
-[memory] WM: empty
-[memory] invariants: active (487 bytes)
-
-Task> Написать HTTP-сервер на Go с логгером
-
-[invariants] checking task description for compliance...
-
-┌─ [PLANNING] 1. PLANNING
-[invariants] checking plan (attempt 1/3)...
-[invariants] plan compliant
-
-┌── Proposed Plan
-────────────────────────────────────────
-1. Создать пакет main с HTTP-сервером на net/http
-2. Подключить log/slog для структурированного логирования
-3. Реализовать handler /health
-4. Добавить unit-тест для handler
-────────────────────────────────────────
-
-Approve this plan? [y/yes = approve | /pause | /restart | /exit | text = revise]
-> y
-
-┌─ [EXECUTION] 2. EXECUTION
-...
-
-┌─ [VALIDATION] 3. VALIDATION
-[invariants] checking execution result for compliance...
-[invariants] compliance check passed
-
-Validate this result? [y/yes = accept | /pause | /restart | /exit | text = reject]
-> y
-
-┌─ [DONE] 4. DONE
-Task completed after 1 planning iteration(s).
-```
-
-### CLI-режим (без изменений)
-
-```bash
-./ai-adv-agent-day14 --query "Что такое goroutine?"
-
-./ai-adv-agent-day14 \
-  --query "Следующий шаг?" \
-  --history session.json \
-  --profile my.md \
-  --memory-update
-```
-
----
-
 ## Структура файлов на диске
 
 | Файл | Назначение | Когда создаётся |
@@ -375,24 +286,11 @@ Task completed after 1 planning iteration(s).
 | `chat_history.ltm.json` | LTM — долгосрочная память (Layer 3) | При `--memory-update` |
 | `chat_history.profile.md` | Профиль пользователя | При `--profile-init` / `--profile-name` / `--profile-set` |
 | `chat_history.invariants.md` | Инварианты | Создаётся вручную; путь задаётся `--invariants` |
-| `chat_history.task.json` | Состояние задачи FSM | В интерактивном режиме; удаляется по завершении задачи |
+| `chat_history.task.json` | Состояние задачи FSM | В интерактивном режиме; удаляется по завершении |
 | `chat_history.stats.json` | Накопленная статистика токенов | При `--show-tokens` / `--show-cost` |
 | `chat_history.summary.txt` | Суммаризация истории | При `--summary` + переполнении |
 | `chat_history.facts.json` | KV-факты sticky-facts | При `--strategy sticky-facts` |
 | `chat_history.branch-state.json` | Состояние веток | При `--strategy branching` |
-
-Все пути выводятся из `--history`. Каждый можно переопределить явным флагом.
-
----
-
-## Переменные окружения
-
-| Переменная | Обязательна | Умолч. |
-|---|---|---|
-| `LLM_PROVIDER` | Да | — (`openai` или `openrouter`) |
-| `LLM_API_KEY` | Да | — |
-| `LLM_MODEL` | Нет | `gpt-4o` (openai) / `openai/gpt-4o-mini` (openrouter) |
-| `LLM_BASE_URL` | Нет | Стандартный URL провайдера |
 
 ---
 
@@ -437,36 +335,31 @@ Task completed after 1 planning iteration(s).
        └─────────────────────────────────────────┘
 ```
 
-### Pipeline compliance-проверок (Day14)
+### Compliance pipeline (Day14+, улучшено в Day15)
 
-Каждая проверка использует `DirectCall` — прямой вызов к LLM без истории, памяти и статистики. Три разных system prompt для трёх разных задач:
+| Функция | Когда | Что проверяет |
+|---|---|---|
+| `checkTaskDescription` | Итерация 1, до планирования | Задача пользователя |
+| `checkPlanCompliance` | После каждой генерации плана | Предложенный план |
+| `checkInvariantsCompliance` | После execution, до user prompt | Результат выполнения |
 
-| Функция | Prompt | Что проверяет | Когда |
-|---|---|---|---|
-| `checkTaskDescription` | "inherently requires violating..." | Задача пользователя | Итерация 1, до планирования |
-| `checkPlanCompliance` | "steps that would violate..." | Предложенный план | После каждой генерации плана |
-| `checkInvariantsCompliance` | "execution result violates..." | Результат выполнения | После execution, до user prompt |
+Все три: `DirectCall` → chain-of-thought по каждому инварианту → финальный вердикт последней строкой → парсер читает только последнюю строку.
 
-Все три возвращают либо `COMPLIANT`, либо `VIOLATION: <описание>`.
+### Prompt helpers
 
-### FSM + слои памяти (Day14)
-
-```
-Системное сообщение = Profile + LTM + WM + Phase prompt + --system flag
-                                                             ▲
-                                           withDomainContext() добавляет сюда
-```
-
-Флаг `--system` приписывается к каждому фазовому промпту через `withDomainContext`, а не заменяет его.
+| Функция | Одобрение | Используется |
+|---|---|---|
+| `prompt()` | `y` / `yes` | — (устаревший, сохранён для обратной совместимости внутри кода) |
+| `reviewPrompt()` | `/yes` | Все точки FSM: Planning, Execution, Validation, Resume |
 
 ---
 
 ## Сборка и тесты
 
 ```bash
-cd Day14
+cd Day15
 
-go build -o ai-adv-agent-day14 .   # или: make build
+go build -o ai-adv-agent-day15 .   # или: make build
 go test -v ./...                    # или: make test
 go vet ./...                        # или: make vet
 ```
@@ -475,95 +368,47 @@ go vet ./...                        # или: make vet
 
 | Пакет | Что тестируется |
 |---|---|
-| `internal/domain` | `TaskState` FSM, переходы, `RetryPlanning`; ценообразование, токены |
-| `internal/usecase` | `AgentUseCase`: happy path, все 3 точки паузы, resume, reject+re-plan; task gate (отказ/пропуск); plan compliance (compliant/silent-retry/all-fail); validation compliance (violation→replan, pass→user); slash-команды `/exit` и `/restart` на всех фазах; memory layer injection; `--system` preservation; `ChatUseCase`, `ProfileUseCase`, `HistoryUseCase` |
-| `internal/adapter/llm` | HTTP-payload (токены, stop, temperature, system message) |
-| `internal/adapter/storage` | Path-хелперы, Load/Save для всех репозиториев включая `InvariantsRepository` |
+| `internal/domain` | `TaskState` FSM, переходы, `RetryPlanning`, `PendingPlan` |
+| `internal/usecase` | `AgentUseCase`: happy path, все точки паузы, resume + PendingPlan restore, `/yes`/`/no`/текст/Enter на каждой фазе; compliance chain-of-thought (pass/fail/last-line parser); slash-команды на всех фазах; memory injection |
+| `internal/adapter/llm` | HTTP-payload |
+| `internal/adapter/storage` | Все репозитории включая `InvariantsRepository` |
 
 ---
 
 ## Makefile targets
 
-### Интерактивный режим
-
 ```bash
-# Ручной запуск (профиль обязателен; инварианты опциональны)
+# Сборка и тесты
+make build
+make test
+make vet
+make clean
+
+# Ручной запуск
 make run-interactive \
     AGENT_PROFILE_FILE=profile_go.md \
     INVARIANTS_FILE=invariants.md
 
-# Свежая сессия для ручного тестирования
 make run-interactive-manual \
     INTERACTIVE_PROFILE_FILE=profile_go.md \
     INVARIANTS_FILE=invariants.md
 
 # Автоматические интеграционные тесты
-make run-interactive-test-happy           # happy path: все 4 фазы до DONE
-make run-interactive-test-pause-resume    # пауза на PLANNING, resume, завершение
-make run-interactive-test                 # запустить оба теста
+make run-interactive-test-happy        # happy path: все 4 фазы до DONE
+make run-interactive-test-pause-resume # пауза на PLANNING, resume, завершение
+make run-interactive-test              # запустить оба
+
+# Полный список
+make help
 ```
 
-### Инварианты
+---
 
-```bash
-# Показать/инициализировать файл инвариантов
-make run-invariants-show INVARIANTS_FILE=invariants.md
-make run-invariants-init INVARIANTS_FILE=invariants.md
-```
+## Переменные окружения
 
-### Профиль пользователя
-
-```bash
-make run-profile-init        PROFILE_FILE=my.md
-make run-profile-set         PROFILE_FILE=my.md
-make run-profile-list        PROFILE_FILE=my.md
-make run-profile-delete  KEY=constraints PROFILE_FILE=my.md
-make run-profile-demo
-
-# Профильные интеграционные сценарии (WM + LTM + Profile)
-make run-profile-go-dev      # Andrey — Golang/Telegram-bot, все 4 слоя памяти
-make run-profile-ai-critic   # Maria  — AI-критик, все 4 слоя памяти
-make run-profile-data-sci    # Alex   — ML-эксперимент, все 4 слоя памяти
-make run-profile-all         # запустить все три последовательно
-```
-
-### 3-слойная память
-
-```bash
-make run-memory QUERY="Меня зовут Andrey, пишу Telegram-бота на Go"
-make run-memory-demo          # 4 хода: накопление WM+LTM, 4-й ход с чистым STM
-make run-memory-recall        # проверить recall без истории диалога
-make run-memory-layers        # показать все 3 слоя рядом
-```
-
-### Стратегии контекста
-
-```bash
-make run-sliding-window                     # последние N сообщений
-make run-sliding-window WINDOW_SIZE=3
-make run-sticky-facts                       # KV-факты переживают ротацию окна
-make run-branching                          # checkpoint → 2 ветки → переключения
-make run-lion-book-test                     # 10-ходовая история × 3 стратегии + AI-критик
-```
-
-### История, токены, суммаризация
-
-```bash
-make run-history-all          # 4 теста истории
-make run-summary-test         # авто-суммаризация при переполнении
-make run-critic-test          # AI-критик: полная история vs. суммари
-make run-tokens               # разбивка токенов
-make run-tokens-cost          # разбивка + стоимость
-make run-tokens-session       # накопленная статистика за 3 хода
-make run-context-overflow     # поведение при переполнении контекста
-```
-
-### Основные
-
-```bash
-make build     # Собрать бинарь
-make test      # Юнит-тесты (без API)
-make vet       # go vet
-make clean     # Удалить артефакты и временные файлы
-make help      # Полный список целей
-```
+| Переменная | Обязательна | Умолч. |
+|---|---|---|
+| `LLM_PROVIDER` | Да | — (`openai` или `openrouter`) |
+| `LLM_API_KEY` | Да | — |
+| `LLM_MODEL` | Нет | `gpt-4o` (openai) / `openai/gpt-4o-mini` (openrouter) |
+| `LLM_BASE_URL` | Нет | Стандартный URL провайдера |
