@@ -364,19 +364,32 @@ func TestExecuteTaskFSM_RejectPlanThenApprove(t *testing.T) {
 
 // ── Task description gate tests ───────────────────────────────────────────────
 
-// TestExecuteTaskFSM_TaskViolatesInvariants verifies that when the user's task
-// description itself conflicts with invariants, the FSM refuses immediately on
-// the first LLM call (the task check), clears the task state, and returns nil
-// without generating a plan or prompting the user.
+// TestExecuteTaskFSM_TaskGateDisabled verifies that the task-description invariant
+// gate is disabled: even a task that explicitly conflicts with invariants proceeds
+// to planning without being refused up front.
 //
-// LLM call sequence:
-//  1. task description check → "VIOLATION: ..."
-func TestExecuteTaskFSM_TaskViolatesInvariants(t *testing.T) {
+// LLM call sequence (no task-check call expected):
+//  1. planning     → "the plan"
+//  2. plan check   → "PASS"
+//  3. execution    → "result"
+//  4. exec check   → "PASS"
+func TestExecuteTaskFSM_TaskGateDisabled(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	calls := 0
 	stub := &capturingLLM{replyFn: func() string {
 		calls++
-		return "VIOLATION: task explicitly requests gin framework which violates 'Go standard library only'"
+		switch calls {
+		case 1:
+			return "the plan"
+		case 2:
+			return "PASS" // plan check
+		case 3:
+			return "result"
+		case 4:
+			return "PASS" // exec check
+		default:
+			return "ok"
+		}
 	}}
 	chatUC := NewChatUseCase(stub,
 		&noopHistoryRepo{}, &noopStatsRepo{}, &noopSummaryRepo{},
@@ -384,45 +397,39 @@ func TestExecuteTaskFSM_TaskViolatesInvariants(t *testing.T) {
 	repo := &memoryTaskRepo{}
 	agent := NewAgentUseCase(chatUC, repo, &stubInvariantsRepo{content: invDoc})
 	out := &bytes.Buffer{}
-	// no user input needed — FSM should refuse before any prompt
-	agent.in = strings.NewReader("")
+	input := "/yes\n/yes\n/yes\n"
+	agent.in = strings.NewReader(input)
 	agent.out = out
 	agent.err = out
 
+	// Task description explicitly conflicts with invariants.
 	ts := domain.NewTaskState("t1", "build a REST API using the gin framework")
 	_ = repo.Save(ts)
 
-	err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader("")), ts, "", ChatConfig{})
+	err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader(input)), ts, "", ChatConfig{})
 	if err != nil {
-		t.Fatalf("expected nil (clean refusal), got error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls != 1 {
-		t.Errorf("expected exactly 1 LLM call (task check), got %d", calls)
+	// Must NOT refuse up front: planning must run as call 1.
+	if strings.Contains(out.String(), "Task Refused") {
+		t.Error("task-gate is disabled — should not refuse the task up front")
 	}
-	if repo.state != nil {
-		t.Error("task state should be cleared after refusal")
+	if calls != 4 {
+		t.Errorf("expected 4 LLM calls (plan + plan-check + exec + exec-check), got %d", calls)
 	}
-	outStr := out.String()
-	if !strings.Contains(outStr, "Task Refused") {
-		t.Error("output should contain 'Task Refused' banner")
-	}
-	if !strings.Contains(outStr, "VIOLATION") {
-		t.Error("output should contain the violation description")
-	}
-	if strings.Contains(outStr, "Proposed Plan") {
-		t.Error("no plan should be shown when the task is refused")
+	if !strings.Contains(out.String(), "DONE") {
+		t.Error("task should complete normally when task gate is disabled")
 	}
 }
 
-// TestExecuteTaskFSM_TaskCompliantProceedsToPlanning verifies that when the task
-// description is compliant, the task check passes and planning proceeds normally.
+// TestExecuteTaskFSM_TaskCompliantProceedsToPlanning verifies that planning proceeds
+// normally and completes with the correct number of LLM calls (no task-gate).
 //
 // LLM call sequence:
-//  1. task description check → "COMPLIANT"
-//  2. planning                → "the plan"
-//  3. plan compliance check   → "COMPLIANT"
-//  4. execution               → "result"
-//  5. execution compliance check → "COMPLIANT"
+//  1. planning               → "the plan"
+//  2. plan compliance check  → "PASS"
+//  3. execution              → "result"
+//  4. execution compliance check → "PASS"
 func TestExecuteTaskFSM_TaskCompliantProceedsToPlanning(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	calls := 0
@@ -430,15 +437,13 @@ func TestExecuteTaskFSM_TaskCompliantProceedsToPlanning(t *testing.T) {
 		calls++
 		switch calls {
 		case 1:
-			return "COMPLIANT" // task check
-		case 2:
 			return "the plan"
+		case 2:
+			return "PASS" // plan check
 		case 3:
-			return "COMPLIANT" // plan check
-		case 4:
 			return "result"
-		case 5:
-			return "COMPLIANT" // exec check
+		case 4:
+			return "PASS" // exec check
 		default:
 			return "ok"
 		}
@@ -461,38 +466,35 @@ func TestExecuteTaskFSM_TaskCompliantProceedsToPlanning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls != 5 {
-		t.Errorf("expected 5 LLM calls (task-check + plan + plan-check + exec + exec-check), got %d", calls)
+	if calls != 4 {
+		t.Errorf("expected 4 LLM calls (plan + plan-check + exec + exec-check), got %d", calls)
 	}
 	if !strings.Contains(out.String(), "DONE") {
-		t.Error("task should complete normally when task description is compliant")
+		t.Error("task should complete normally")
 	}
 }
 
-// TestExecuteTaskFSM_TaskCheckNotRepeatedOnReplan verifies that the task description
-// check runs only on the first iteration (Iteration==1). When the FSM returns to
-// PLANNING due to a user rejection (Iteration==2), the task check must NOT fire again.
+// TestExecuteTaskFSM_TaskCheckNotRepeatedOnReplan verifies that on re-planning
+// (Iteration==2) only the plan and plan-check calls run — no extra gate call.
 //
-// LLM call sequence (no invariants on task check for iteration 2):
-//  1. task check (iter 1)     → "COMPLIANT"
-//  2. plan attempt 1          → "plan v1"
-//  3. plan check              → "COMPLIANT"
+// LLM call sequence:
+//  1. plan attempt 1  → "plan v1"
+//  2. plan check      → "PASS"
 //     user rejects plan v1
-//  4. plan attempt 2 (iter 2) → "plan v2"   ← no task check here
-//  5. plan check              → "COMPLIANT"
-//  6. execution               → "result"
-//  7. exec check              → "COMPLIANT"
+//  3. plan attempt 2  → "plan v2"
+//  4. plan check      → "PASS"
+//  5. execution       → "result"
+//  6. exec check      → "PASS"
 func TestExecuteTaskFSM_TaskCheckNotRepeatedOnReplan(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	replies := []string{
-		"COMPLIANT", // task check (iter 1)
 		"plan v1",
-		"COMPLIANT", // plan check v1
-		// user rejects → iter 2 (no task check)
+		"PASS", // plan check v1
+		// user rejects → iter 2
 		"plan v2",
-		"COMPLIANT", // plan check v2
+		"PASS", // plan check v2
 		"result",
-		"COMPLIANT", // exec check
+		"PASS", // exec check
 	}
 	idx := 0
 	stub := &capturingLLM{replyFn: func() string {
@@ -522,8 +524,8 @@ func TestExecuteTaskFSM_TaskCheckNotRepeatedOnReplan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx != 7 {
-		t.Errorf("expected exactly 7 LLM calls, got %d (task-check must NOT repeat on iter 2)", idx)
+	if idx != 6 {
+		t.Errorf("expected exactly 6 LLM calls, got %d", idx)
 	}
 }
 
@@ -534,11 +536,10 @@ func TestExecuteTaskFSM_TaskCheckNotRepeatedOnReplan(t *testing.T) {
 // with no warning banner.
 //
 // LLM call sequence:
-//  1. task description check → "COMPLIANT"
-//  2. planning               → "compliant plan"
-//  3. plan compliance check  → "COMPLIANT"
-//  4. execution              → "execution result"
-//  5. execution check        → "COMPLIANT"
+//  1. planning               → "compliant plan"
+//  2. plan compliance check  → "PASS"
+//  3. execution              → "execution result"
+//  4. execution check        → "PASS"
 func TestExecuteTaskFSM_PlanCompliantFirstAttempt(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	calls := 0
@@ -546,15 +547,13 @@ func TestExecuteTaskFSM_PlanCompliantFirstAttempt(t *testing.T) {
 		calls++
 		switch calls {
 		case 1:
-			return "COMPLIANT" // task description check
-		case 2:
 			return "compliant plan"
+		case 2:
+			return "PASS" // plan compliance check
 		case 3:
-			return "COMPLIANT" // plan compliance check
-		case 4:
 			return "execution result"
-		case 5:
-			return "COMPLIANT" // execution compliance check
+		case 4:
+			return "PASS" // execution compliance check
 		default:
 			return "ok"
 		}
@@ -588,23 +587,21 @@ func TestExecuteTaskFSM_PlanCompliantFirstAttempt(t *testing.T) {
 // ever sees the compliant plan (no warning banner, no violation visible).
 //
 // LLM call sequence:
-//  1. task description check → "COMPLIANT"
-//  2. planning attempt 1     → "bad plan"
-//  3. plan check attempt 1   → "VIOLATION: uses gin"
-//  4. planning attempt 2     → "good plan"
-//  5. plan check attempt 2   → "COMPLIANT"
-//  6. execution              → "result"
-//  7. execution check        → "COMPLIANT"
+//  1. planning attempt 1     → "bad plan"
+//  2. plan check attempt 1   → "FAIL\n- uses gin"
+//  3. planning attempt 2     → "good plan"
+//  4. plan check attempt 2   → "PASS"
+//  5. execution              → "result"
+//  6. execution check        → "PASS"
 func TestExecuteTaskFSM_PlanViolationSilentRetry(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	replies := []string{
-		"COMPLIANT", // task description check
 		"bad plan",
-		"VIOLATION: uses gin framework",
+		"FAIL\n- uses gin framework",
 		"good plan",
-		"COMPLIANT",
+		"PASS",
 		"result",
-		"COMPLIANT",
+		"PASS",
 	}
 	idx := 0
 	stub := &capturingLLM{replyFn: func() string {
@@ -631,8 +628,8 @@ func TestExecuteTaskFSM_PlanViolationSilentRetry(t *testing.T) {
 	if err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader(input)), ts, "", ChatConfig{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx != 7 {
-		t.Errorf("expected 7 LLM calls, got %d", idx)
+	if idx != 6 {
+		t.Errorf("expected 6 LLM calls, got %d", idx)
 	}
 	outStr := out.String()
 	if strings.Contains(outStr, "bad plan") {
@@ -652,31 +649,28 @@ func TestExecuteTaskFSM_PlanViolationSilentRetry(t *testing.T) {
 // if the user approves it.
 //
 // LLM call sequence (maxPlanAttempts=3):
-//  1. task description check → "COMPLIANT"
-//  2. plan attempt 1  → "bad plan 1"
-//  3. check 1         → "VIOLATION: ..."
-//  4. plan attempt 2  → "bad plan 2"
-//  5. check 2         → "VIOLATION: ..."
-//  6. plan attempt 3  → "bad plan 3"
-//  7. check 3         → "VIOLATION: ..."
-//  8. execution       → "result"
-//  9. exec check      → "COMPLIANT"
+//  1. plan attempt 1  → "bad plan 1"
+//  2. check 1         → "FAIL\n- ..."
+//  3. plan attempt 2  → "bad plan 2"
+//  4. check 2         → "FAIL\n- ..."
+//  5. plan attempt 3  → "bad plan 3"
+//  6. check 3         → "FAIL\n- ..."
+//  7. execution       → "result"
+//  8. exec check      → "PASS"
 func TestExecuteTaskFSM_PlanViolationAllAttemptsFail(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 	idx := 0
 	stub := &capturingLLM{replyFn: func() string {
 		idx++
 		switch idx {
-		case 1:
-			return "COMPLIANT" // task description check
+		case 1, 3, 5:
+			return fmt.Sprintf("bad plan %d", (idx+1)/2)
 		case 2, 4, 6:
-			return fmt.Sprintf("bad plan %d", (idx)/2)
-		case 3, 5, 7:
-			return "VIOLATION: uses external library"
-		case 8:
+			return "FAIL\n- uses external library"
+		case 7:
 			return "execution result"
-		case 9:
-			return "COMPLIANT"
+		case 8:
+			return "PASS"
 		default:
 			return "ok"
 		}
@@ -697,8 +691,8 @@ func TestExecuteTaskFSM_PlanViolationAllAttemptsFail(t *testing.T) {
 	if err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader(input)), ts, "", ChatConfig{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx != 9 {
-		t.Errorf("expected 9 LLM calls, got %d", idx)
+	if idx != 8 {
+		t.Errorf("expected 8 LLM calls, got %d", idx)
 	}
 	outStr := out.String()
 	if !strings.Contains(outStr, "Compliance Warning") {
@@ -714,36 +708,30 @@ func TestExecuteTaskFSM_PlanViolationAllAttemptsFail(t *testing.T) {
 
 // ── Invariants unit tests ─────────────────────────────────────────────────────
 
-// TestExecuteTaskFSM_ValidationInvariantViolation_AutoReplanning verifies that
-// when the execution result violates an invariant the FSM automatically rejects
-// it and returns to PLANNING without asking the user, then completes normally
-// after a compliant re-execution.
+// TestExecuteTaskFSM_ValidationInvariantViolation_AutoReExecution verifies that
+// when the execution result violates an invariant the FSM automatically returns
+// to EXECUTION (not planning) without asking the user, then completes normally
+// after a compliant re-execution with the same approved plan.
 //
 // LLM call sequence:
-//  1. task description check   → "COMPLIANT"
-//  2. planning (v1)            → "plan v1"
-//  3. plan check (v1)          → "COMPLIANT"
-//  4. execution (v1)           → "bad result"
-//  5. exec compliance check    → "VIOLATION: uses gin framework"
-//  6. planning (v2)            → "plan v2"   [iter 2 — no task check]
-//  7. plan check (v2)          → "COMPLIANT"
-//  8. execution (v2)           → "good result"
-//  9. exec compliance check    → "COMPLIANT"
+//  1. planning (v1)         → "plan v1"
+//  2. plan check (v1)       → "PASS"
+//  3. execution (v1)        → "bad result"
+//  4. exec compliance check → "FAIL\n- uses gin framework, violates 'Go standard library only'"
+//  5. re-execution (v1 fix) → "good result"   [same plan, violation context injected]
+//  6. exec compliance check → "PASS"
 //
-// User input: y · y · y · y · y
-func TestExecuteTaskFSM_ValidationInvariantViolation_AutoReplanning(t *testing.T) {
+// User input: /yes · /yes · /yes · /yes
+func TestExecuteTaskFSM_ValidationInvariantViolation_AutoReExecution(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 
 	replies := []string{
-		"COMPLIANT", // task description check (iter 1 only)
 		"plan v1",
-		"COMPLIANT", // plan v1 passes plan-check
+		"PASS", // plan v1 passes plan-check
 		"bad result",
-		"VIOLATION: uses gin framework, violates 'Go standard library only'",
-		"plan v2",
-		"COMPLIANT", // plan v2 passes plan-check
-		"good result",
-		"COMPLIANT",
+		"FAIL\n- uses gin framework, violates 'Go standard library only'",
+		"good result", // re-execution with violation context
+		"PASS",
 	}
 	callIdx := 0
 	stub := &capturingLLM{replyFn: func() string {
@@ -761,8 +749,8 @@ func TestExecuteTaskFSM_ValidationInvariantViolation_AutoReplanning(t *testing.T
 	repo := &memoryTaskRepo{}
 	agent := NewAgentUseCase(chatUC, repo, &stubInvariantsRepo{content: invDoc})
 	out := &bytes.Buffer{}
-	// approve plan v1 · continue to validation · approve plan v2 · continue · accept result
-	input := "/yes\n/yes\n/yes\n/yes\n/yes\n"
+	// approve plan v1 · continue to validation · [auto-reexecute, no prompt] · continue to validation · accept result
+	input := "/yes\n/yes\n/yes\n/yes\n"
 	agent.in = strings.NewReader(input)
 	agent.out = out
 	agent.err = out
@@ -775,16 +763,19 @@ func TestExecuteTaskFSM_ValidationInvariantViolation_AutoReplanning(t *testing.T
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if callIdx != 9 {
-		t.Errorf("expected 9 LLM calls, got %d", callIdx)
+	if callIdx != 6 {
+		t.Errorf("expected 6 LLM calls, got %d", callIdx)
 	}
 
 	outStr := out.String()
-	if !strings.Contains(outStr, "VIOLATION") {
-		t.Error("output should report the invariant violation")
+	if !strings.Contains(outStr, "gin framework") {
+		t.Error("output should report the invariant violation details")
 	}
-	if !strings.Contains(outStr, "re-plan #2") {
-		t.Error("output should show re-planning iteration after violation")
+	if strings.Contains(outStr, "re-plan #2") {
+		t.Error("output must NOT show re-planning iteration — violation returns to EXECUTION, not PLANNING")
+	}
+	if !strings.Contains(outStr, "EXECUTION") {
+		t.Error("output should mention returning to EXECUTION for targeted fix")
 	}
 	if !strings.Contains(outStr, "DONE") {
 		t.Error("task should complete after compliant re-execution")
@@ -799,13 +790,12 @@ func TestExecuteTaskFSM_ValidationInvariantViolation_AutoReplanning(t *testing.T
 // prompt and completes normally on approval.
 //
 // LLM call sequence:
-//  1. task description check → "COMPLIANT"
-//  2. planning               → "the plan"
-//  3. plan check             → "COMPLIANT"
-//  4. execution              → "execution result"
-//  5. exec check             → "COMPLIANT"
+//  1. planning               → "the plan"
+//  2. plan check             → "PASS"
+//  3. execution              → "execution result"
+//  4. exec check             → "PASS"
 //
-// User input: y · y · y
+// User input: /yes · /yes · /yes
 func TestExecuteTaskFSM_ValidationCompliancePass_ProceedsToUserPrompt(t *testing.T) {
 	const invDoc = "## Stack\n- Go standard library only"
 
@@ -814,15 +804,13 @@ func TestExecuteTaskFSM_ValidationCompliancePass_ProceedsToUserPrompt(t *testing
 		calls++
 		switch calls {
 		case 1:
-			return "COMPLIANT" // task description check
-		case 2:
 			return "the plan"
+		case 2:
+			return "PASS" // plan check
 		case 3:
-			return "COMPLIANT" // plan check
-		case 4:
 			return "execution result"
-		case 5:
-			return "COMPLIANT" // execution check
+		case 4:
+			return "PASS" // execution check
 		default:
 			return "ok"
 		}
@@ -846,8 +834,8 @@ func TestExecuteTaskFSM_ValidationCompliancePass_ProceedsToUserPrompt(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls != 5 {
-		t.Errorf("expected 5 LLM calls (task-check + plan + plan-check + execution + exec-check), got %d", calls)
+	if calls != 4 {
+		t.Errorf("expected 4 LLM calls (plan + plan-check + execution + exec-check), got %d", calls)
 	}
 	if !strings.Contains(out.String(), "DONE") {
 		t.Error("task should complete normally when all compliance checks pass")
@@ -886,14 +874,13 @@ func TestExecuteTaskFSM_InvariantsInjectedIntoSystemPrompt(t *testing.T) {
 	}
 
 	// With invariants active the call order is:
-	//   0: task-description check (DirectCall)
-	//   1: planning (Execute)
-	//   2: plan compliance check (DirectCall)
-	//   3: execution (Execute)
-	//   4: execution compliance check (DirectCall)
-	// We verify calls 1 and 3 (planning and execution) both embed the invariants.
-	planningCall := stub.captured[1]
-	execCall := stub.captured[3]
+	//   0: planning (Execute)
+	//   1: plan compliance check (DirectCall)
+	//   2: execution (Execute)
+	//   3: execution compliance check (DirectCall)
+	// We verify calls 0 and 2 (planning and execution) both embed the invariants.
+	planningCall := stub.captured[0]
+	execCall := stub.captured[2]
 	for i, req := range []port.LLMRequest{planningCall, execCall} { // 0=planning, 1=execution
 		if len(req.Messages) == 0 {
 			t.Fatalf("call %d: no messages", i)
@@ -1369,30 +1356,37 @@ func TestExecutionSystemPrompt_EmbedsPlanAndInvariants(t *testing.T) {
 	}
 }
 
-// TestComplianceCheckPrompts_ContentSpecificity verifies that each compliance check
-// system prompt targets the correct artefact type (task request / plan / execution result).
-func TestComplianceCheckPrompts_ContentSpecificity(t *testing.T) {
+// TestCheckerSystemPrompt_ContentSpecificity verifies that each checker system prompt
+// targets the correct artefact type (task request / plan / execution result).
+func TestCheckerSystemPrompt_ContentSpecificity(t *testing.T) {
 	inv := "## Stack\n- stdlib only"
 
-	taskPrompt := taskDescriptionCheckSystemPrompt(inv)
-	planPrompt := planComplianceCheckSystemPrompt(inv)
-	execPrompt := executionComplianceCheckSystemPrompt(inv)
+	taskPrompt := checkerSystemPrompt(CheckKindTask, inv)
+	planPrompt := checkerSystemPrompt(CheckKindPlan, inv)
+	execPrompt := checkerSystemPrompt(CheckKindExecution, inv)
 
 	if !strings.Contains(strings.ToLower(taskPrompt), "task request") {
-		t.Error("task description check prompt must mention 'task request'")
+		t.Error("task checker prompt must mention 'task request'")
 	}
 	if !strings.Contains(strings.ToLower(planPrompt), "plan") {
-		t.Error("plan compliance check prompt must mention 'plan'")
+		t.Error("plan checker prompt must mention 'plan'")
 	}
 	if !strings.Contains(strings.ToLower(execPrompt), "execution result") {
-		t.Error("execution compliance check prompt must mention 'execution result'")
+		t.Error("execution checker prompt must mention 'execution result'")
 	}
-	// Cross-contamination guards: each prompt must be specific to its stage.
+	// Conservative note only for task kind.
+	if !strings.Contains(taskPrompt, "conservative") {
+		t.Error("task checker prompt must include conservative note")
+	}
+	if strings.Contains(planPrompt, "conservative") {
+		t.Error("plan checker prompt must not include conservative note")
+	}
+	// Cross-contamination guards.
 	if strings.Contains(strings.ToLower(execPrompt), "decompose") {
-		t.Error("execution compliance check prompt must not contain planning instructions")
+		t.Error("execution checker prompt must not contain planning instructions")
 	}
 	if strings.Contains(strings.ToLower(planPrompt), "execution result") {
-		t.Error("plan compliance check prompt must not reference execution result")
+		t.Error("plan checker prompt must not reference execution result")
 	}
 }
 
@@ -1484,17 +1478,16 @@ func TestFSM_ExecutionPhaseUsesApprovedPlan(t *testing.T) {
 }
 
 // TestFSM_ExecutionPhaseInvariantsInjected verifies that invariants are embedded in
-// the EXECUTION system message — not only in PLANNING as the task description check.
-// Regression: with invariants active call order is task-check(0), planning(1),
-// plan-check(2), execution(3), exec-check(4) — so captured[3] is the execution call.
+// the EXECUTION system message.
+// With invariants active (no task gate) call order is:
+// planning(0), plan-check(1), execution(2), exec-check(3) — so captured[2] is the execution call.
 func TestFSM_ExecutionPhaseInvariantsInjected(t *testing.T) {
 	const invDoc = "## Stack\n- stdlib only"
 	replies := []string{
-		"COMPLIANT", // task description check
 		"the plan",  // planning
-		"COMPLIANT", // plan compliance check
+		"PASS", // plan compliance check
 		"result",    // execution
-		"COMPLIANT", // execution compliance check
+		"PASS", // execution compliance check
 	}
 	idx := 0
 	stub := &capturingLLM{replyFn: func() string {
@@ -1521,11 +1514,11 @@ func TestFSM_ExecutionPhaseInvariantsInjected(t *testing.T) {
 	if err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader(input)), ts, "", ChatConfig{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if idx != 5 {
-		t.Fatalf("expected 5 LLM calls, got %d", idx)
+	if idx != 4 {
+		t.Fatalf("expected 4 LLM calls, got %d", idx)
 	}
-	// captured[3] is the execution call (index 3 in 0-based ordering).
-	execSys := stub.captured[3].Messages[0]
+	// captured[2] is the execution call.
+	execSys := stub.captured[2].Messages[0]
 	if execSys.Role != domain.RoleSystem {
 		t.Fatalf("execution call first message must be system, got %s", execSys.Role)
 	}
@@ -1562,13 +1555,12 @@ func TestFSM_ExecutionPhase_ArbitraryTextPauses(t *testing.T) {
 // invariant compliance check in the VALIDATION phase sends ts.Result (the execution
 // output) to the LLM checker — not ts.Plan or the original task description.
 //
-// With invariants, call order:
+// With invariants (no task gate), call order:
 //
-//	0: task description check (DirectCall)
-//	1: planning (Execute)
-//	2: plan compliance check (DirectCall)
-//	3: execution (Execute)
-//	4: execution compliance check (DirectCall)  ← THIS is the validation check
+//	0: planning (Execute)
+//	1: plan compliance check (DirectCall)
+//	2: execution (Execute)
+//	3: execution compliance check (DirectCall)  ← THIS is the validation check
 func TestFSM_ValidationPhase_ComplianceCheckSendsExecutionResult(t *testing.T) {
 	const invDoc = "## Stack\n- stdlib only"
 	const planText = "plan: use net/http"
@@ -1579,15 +1571,13 @@ func TestFSM_ValidationPhase_ComplianceCheckSendsExecutionResult(t *testing.T) {
 		calls++
 		switch calls {
 		case 1:
-			return "COMPLIANT" // task description check
-		case 2:
 			return planText // planning
+		case 2:
+			return "PASS" // plan compliance check
 		case 3:
-			return "COMPLIANT" // plan compliance check
-		case 4:
 			return resultText // execution
-		case 5:
-			return "COMPLIANT" // execution compliance check
+		case 4:
+			return "PASS" // execution compliance check
 		default:
 			return "ok"
 		}
@@ -1608,11 +1598,11 @@ func TestFSM_ValidationPhase_ComplianceCheckSendsExecutionResult(t *testing.T) {
 	if err := agent.executeTaskFSM(bufio.NewReader(strings.NewReader(input)), ts, "", ChatConfig{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if calls != 5 {
-		t.Fatalf("expected 5 LLM calls, got %d", calls)
+	if calls != 4 {
+		t.Fatalf("expected 4 LLM calls, got %d", calls)
 	}
-	// captured[4] is the execution compliance check (validation-phase invariant check).
-	complianceCall := stub.captured[4]
+	// captured[3] is the execution compliance check (validation-phase invariant check).
+	complianceCall := stub.captured[3]
 	if len(complianceCall.Messages) < 2 {
 		t.Fatalf("compliance check must have ≥2 messages, got %d", len(complianceCall.Messages))
 	}

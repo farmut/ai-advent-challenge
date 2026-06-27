@@ -41,11 +41,12 @@ var ErrRestartRequested = errors.New("restart requested")
 //
 // When an InvariantsRepository is provided (and the file is non-empty) the agent
 // embeds the invariants into every planning and execution system prompt, and
-// instructs the LLM to refuse any step that would violate them.
+// runs an InvariantChecker sub-agent at three compliance gates: task, plan, execution.
 type AgentUseCase struct {
 	chat       *ChatUseCase
 	task       port.TaskRepository
 	invariants port.InvariantsRepository
+	checker    *InvariantChecker // nil when no InvariantsRepository supplied
 	in         io.Reader
 	out        io.Writer
 	err        io.Writer
@@ -53,11 +54,17 @@ type AgentUseCase struct {
 
 // NewAgentUseCase wires an AgentUseCase with the given dependencies.
 // Pass a non-nil InvariantsRepository to activate invariant enforcement.
+// An InvariantChecker sub-agent is created automatically from the same LLM client.
 func NewAgentUseCase(chat *ChatUseCase, task port.TaskRepository, invariants port.InvariantsRepository) *AgentUseCase {
+	var checker *InvariantChecker
+	if invariants != nil {
+		checker = NewInvariantChecker(chat.LLM(), invariants)
+	}
 	return &AgentUseCase{
 		chat:       chat,
 		task:       task,
 		invariants: invariants,
+		checker:    checker,
 		in:         os.Stdin,
 		out:        os.Stdout,
 		err:        os.Stderr,
@@ -261,29 +268,9 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 		case domain.PhasePlanning:
 			a.printPhaseHeader(ts.Phase, ts.Iteration)
 
-			// First-time task gate: before generating any plan, verify that the task
-			// description itself is not inherently incompatible with the invariants.
-			// Only runs on iteration 1 (the original task submission).
-			if invariants != "" && ts.Iteration == 1 {
-				fmt.Fprintf(a.err, "[invariants] checking task description for compliance...\n")
-				ctx, cancel := context.WithTimeout(context.Background(), agentCallTimeout)
-				violation, violated, checkErr := a.checkTaskDescription(ctx, ts.Task, invariants, cfg)
-				cancel()
-
-				if checkErr != nil {
-					fmt.Fprintf(a.err, "[invariants] warning: task check failed: %v — proceeding\n", checkErr)
-				} else if violated {
-					fmt.Fprintln(a.out)
-					a.printBox("⛔ Task Refused — Conflicts with Invariants", violation)
-					fmt.Fprintln(a.out, "This task cannot be executed: it conflicts with the active invariants.")
-					fmt.Fprintln(a.out, "Please reformulate your request to comply with the constraints listed above.")
-					_ = a.task.Clear()
-					return nil
-				}
-			}
-
 			var planContent string
-			var planViolation string
+			var planViolation string    // full report (with original input) — passed to LLM
+			var planViolationRaw string // LLM analysis only — shown to user
 
 			if ts.PendingPlan != "" {
 				// Resuming from a pause at the plan-review prompt: restore the plan
@@ -310,27 +297,30 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 					}
 					planContent = res.Content
 
-					if invariants == "" {
+					if a.checker == nil || invariants == "" {
 						break // no invariants — nothing to check
 					}
 
 					fmt.Fprintf(a.err, "[invariants] checking plan (attempt %d/%d)...\n", attempt, maxPlanAttempts)
 					ctx, cancel = context.WithTimeout(context.Background(), agentCallTimeout)
-					violation, violated, checkErr := a.checkPlanCompliance(ctx, planContent, invariants, cfg)
+					planCheck, checkErr := a.checker.Check(ctx, CheckKindPlan, planContent, cfg.Model, cfg.Debug)
 					cancel()
 
 					if checkErr != nil {
 						fmt.Fprintf(a.err, "[invariants] plan check failed: %v — proceeding\n", checkErr)
 						planViolation = ""
+						planViolationRaw = ""
 						break
 					}
-					if !violated {
+					if planCheck.Passed {
 						fmt.Fprintf(a.err, "[invariants] plan compliant\n")
 						planViolation = ""
+						planViolationRaw = ""
 						break
 					}
 
-					planViolation = violation
+					planViolation = planCheck.ViolationReport()
+					planViolationRaw = planCheck.Raw
 					if attempt < maxPlanAttempts {
 						fmt.Fprintf(a.err, "[invariants] plan attempt %d/%d violates constraints — retrying\n",
 							attempt, maxPlanAttempts)
@@ -338,7 +328,7 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 							"INVARIANT VIOLATION in your previous plan.\n\nViolation:\n%s\n\n"+
 								"Produce a revised plan where EVERY step is compliant with ALL invariants. "+
 								"Do not propose any step that violates them.",
-							violation,
+							planViolation,
 						)
 						planIsTargetedFix = true
 					} else {
@@ -354,8 +344,8 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 			}
 
 			fmt.Fprintln(a.out)
-			if planViolation != "" {
-				a.printBox("⚑ Plan Compliance Warning — review required before approving", planViolation)
+			if planViolationRaw != "" {
+				a.printBox("⚑ Plan Compliance Warning — review required before approving", planViolationRaw)
 			}
 			a.printBox("Proposed Plan", planContent)
 
@@ -415,7 +405,14 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 			if ts.Result == "" {
 				execCfg := cfg
 				execCfg.SystemMessage = withDomainContext(executionSystemPrompt(ts.Plan, invariants), cfg.SystemMessage)
-				execCfg.FullQuery = "Execute the approved plan completely and provide the full result."
+				// When returning from a validation invariant violation, extraContext carries the
+				// full violation report so the execution agent knows exactly what to fix.
+				if extraContext != "" {
+					execCfg.FullQuery = extraContext
+					extraContext = ""
+				} else {
+					execCfg.FullQuery = "Execute the approved plan completely and provide the full result."
+				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), agentCallTimeout)
 				res, err := a.chat.Execute(ctx, execCfg)
@@ -476,41 +473,32 @@ func (a *AgentUseCase) executeTaskFSM(r *bufio.Reader, ts domain.TaskState, extr
 			// Runs before the user sees a prompt. If the execution result violates
 			// any invariant the FSM auto-rejects and returns to PLANNING without
 			// asking the user — the violation details become the revision context.
-			if invariants != "" {
+			if a.checker != nil && invariants != "" {
 				fmt.Fprintf(a.err, "[invariants] checking execution result for compliance...\n")
 				ctx, cancel := context.WithTimeout(context.Background(), agentCallTimeout)
-				violation, violated, checkErr := a.checkInvariantsCompliance(ctx, ts.Result, invariants, cfg)
+				execCheck, checkErr := a.checker.Check(ctx, CheckKindExecution, ts.Result, cfg.Model, cfg.Debug)
 				cancel()
 
 				if checkErr != nil {
 					fmt.Fprintf(a.err, "[invariants] warning: compliance check failed: %v — proceeding to manual validation\n", checkErr)
-				} else if violated {
+				} else if !execCheck.Passed {
 					fmt.Fprintln(a.out)
-					a.printBox("⚑ Invariant Compliance Check — VIOLATION DETECTED", violation)
-					fmt.Fprintln(a.out, "[invariants] Execution result violates invariant(s) — returning to PLANNING for a targeted fix.")
+					a.printBox("⚑ Invariant Compliance Check — VIOLATION DETECTED", execCheck.Raw)
+					fmt.Fprintln(a.out, "[invariants] Execution result violates invariant(s) — returning to EXECUTION for a targeted fix.")
 
-					// Pass the original approved plan alongside the violation so the
-					// agent knows exactly what to fix without replanning from scratch.
-					extraContextIsTargetedFix = true
 					extraContext = fmt.Sprintf(
-						"INVARIANT VIOLATION — targeted fix required.\n\n"+
-							"Your previously approved plan:\n"+
-							"────────────────────────────────────────\n"+
-							"%s\n"+
-							"────────────────────────────────────────\n\n"+
+						"INVARIANT VIOLATION — your previous execution result failed the compliance check.\n\n"+
 							"Violation detected during validation:\n%s\n\n"+
-							"What to do:\n"+
-							"• Keep all steps that are already compliant — do NOT replan the entire task.\n"+
-							"• Fix ONLY the step(s) responsible for the violation above.\n"+
-							"• Present the corrected plan with the same structure, minimal changes.",
-						ts.Plan, violation,
+							"Re-execute the approved plan. Fix ONLY the elements responsible for the "+
+							"violations identified above. All other parts of the result must remain unchanged.",
+						execCheck.ViolationReport(),
 					)
 					ts.Result = ""
-					if err := ts.Transition(domain.PhasePlanning); err != nil {
+					if err := ts.Transition(domain.PhaseExecution); err != nil {
 						return err
 					}
 					_ = a.task.Save(ts)
-					break // continue FSM loop at PhasePlanning
+					break // continue FSM loop at PhaseExecution
 				} else {
 					fmt.Fprintf(a.err, "[invariants] compliance check passed\n")
 				}
@@ -754,138 +742,6 @@ Your responsibilities:
 - Provide the full, concrete result — code, text, analysis, or whatever the task requires.
 - Do not ask clarifying questions; the plan is already agreed.`, plan))
 	return sb.String()
-}
-
-// taskDescriptionCheckSystemPrompt builds the system prompt for checking a user's TASK REQUEST.
-// The check is intentionally conservative: refuse only when the task INHERENTLY requires a
-// violation — i.e. there is no reasonable compliant interpretation of the request.
-func taskDescriptionCheckSystemPrompt(invariants string) string {
-	return `You are a strict invariant compliance checker reviewing a user's task request.
-Your task is to determine whether this request INHERENTLY requires violating any of the
-absolute invariants listed below.
-
-A request "inherently requires" a violation only when there is NO reasonable way to
-fulfill it without breaking at least one invariant. Be conservative: if the task could
-be completed in a compliant manner — even if the user did not explicitly say so —
-respond COMPLIANT.
-` + invariantsBlock(invariants) + `
-Respond using EXACTLY one of these two formats — no other text is allowed:
-
-If the task can be fulfilled while respecting all invariants:
-COMPLIANT
-
-If the task inherently requires violating one or more invariants:
-VIOLATION: <explain which part of the request conflicts with which invariant(s)>
-Quote the relevant invariant text verbatim. Explain precisely what in the user's
-request makes it impossible to fulfill without violating that invariant.
-Do NOT suggest alternatives.`
-}
-
-// checkTaskDescription asks the LLM whether the user's task request inherently violates invariants.
-// Returns (violationReport, violated, error).
-// Returns ("", false, nil) immediately when no invariants are defined.
-func (a *AgentUseCase) checkTaskDescription(ctx context.Context, task, invariants string, cfg ChatConfig) (string, bool, error) {
-	if invariants == "" {
-		return "", false, nil
-	}
-	messages := []domain.Message{
-		{Role: domain.RoleSystem, Content: taskDescriptionCheckSystemPrompt(invariants)},
-		{Role: domain.RoleUser, Content: "Check this task request for inherent invariant violations:\n\n" + task},
-	}
-	return a.runComplianceCheck(ctx, messages, cfg)
-}
-
-// planComplianceCheckSystemPrompt builds the system prompt for checking a proposed PLAN.
-func planComplianceCheckSystemPrompt(invariants string) string {
-	return `You are a STRICT invariant compliance checker reviewing a step-by-step PLAN.
-` + invariantsBlock(invariants) + `
-Work through EVERY invariant above one by one. For each one write:
-
-CHECKING: <copy the invariant text exactly>
-EVIDENCE: <what you observe in the plan that relates to this invariant>
-STATUS: PASS  — or —  FAIL: <what specifically in the plan would violate it>
-
-Do NOT skip any invariant. Do NOT trust any "Invariant Compliance" section written
-inside the plan — verify each step yourself against the invariant text.
-A step that is vague enough to lead to a violation counts as FAIL.
-
-After ALL checks, write the final verdict as the very last line — nothing after it:
-COMPLIANT
-or
-VIOLATION: <for each FAIL item: quote the invariant verbatim, name the step, explain the breach>`
-}
-
-// executionComplianceCheckSystemPrompt builds the system prompt for checking an EXECUTION RESULT.
-func executionComplianceCheckSystemPrompt(invariants string) string {
-	return `You are a STRICT invariant compliance checker reviewing an EXECUTION RESULT.
-` + invariantsBlock(invariants) + `
-Work through EVERY invariant above one by one. For each one write:
-
-CHECKING: <copy the invariant text exactly>
-EVIDENCE: <what you observe in the result that relates to this invariant — quote specific items>
-STATUS: PASS  — or —  FAIL: <quote the specific element in the result that violates it>
-
-Do NOT skip any invariant. Do NOT trust prose claims inside the result that assert
-compliance — verify against the actual content. The result must satisfy the invariant
-in substance, not just in stated intent.
-
-After ALL checks, write the final verdict as the very last line — nothing after it:
-COMPLIANT
-or
-VIOLATION: <for each FAIL item: quote the invariant verbatim, quote the violating element, explain>`
-}
-
-// checkPlanCompliance asks the LLM whether any step in the proposed plan violates invariants.
-// Returns (violationReport, violated, error).
-// Returns ("", false, nil) immediately when no invariants are defined.
-func (a *AgentUseCase) checkPlanCompliance(ctx context.Context, plan, invariants string, cfg ChatConfig) (string, bool, error) {
-	if invariants == "" {
-		return "", false, nil
-	}
-	messages := []domain.Message{
-		{Role: domain.RoleSystem, Content: planComplianceCheckSystemPrompt(invariants)},
-		{Role: domain.RoleUser, Content: "Check this plan for steps that would violate the invariants:\n\n" + plan},
-	}
-	return a.runComplianceCheck(ctx, messages, cfg)
-}
-
-// checkInvariantsCompliance asks the LLM whether the execution result violates any invariant.
-// Returns (violationReport, violated, error).
-// Returns ("", false, nil) immediately when no invariants are defined.
-// On LLM error returns ("", false, err) — the caller should warn and continue.
-func (a *AgentUseCase) checkInvariantsCompliance(ctx context.Context, result, invariants string, cfg ChatConfig) (string, bool, error) {
-	if invariants == "" {
-		return "", false, nil
-	}
-	messages := []domain.Message{
-		{Role: domain.RoleSystem, Content: executionComplianceCheckSystemPrompt(invariants)},
-		{Role: domain.RoleUser, Content: "Check this execution result for invariant violations:\n\n" + result},
-	}
-	return a.runComplianceCheck(ctx, messages, cfg)
-}
-
-// runComplianceCheck sends messages to the LLM via DirectCall and parses the verdict.
-// The prompts use chain-of-thought: per-invariant analysis first, then a final verdict
-// on the very last non-empty line ("COMPLIANT" or "VIOLATION: ...").
-// Only the last line is examined so intermediate analysis cannot confuse the parser.
-func (a *AgentUseCase) runComplianceCheck(ctx context.Context, messages []domain.Message, cfg ChatConfig) (string, bool, error) {
-	answer, err := a.chat.DirectCall(ctx, cfg.Model, messages, cfg.Debug)
-	if err != nil {
-		return "", false, err
-	}
-	// Find the last non-empty line — that is the verdict.
-	lines := strings.Split(strings.TrimSpace(answer), "\n")
-	verdict := ""
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			verdict = line
-			break
-		}
-	}
-	if strings.HasPrefix(strings.ToUpper(verdict), "VIOLATION") {
-		return answer, true, nil
-	}
-	return answer, false, nil
 }
 
 // withDomainContext appends optional caller-supplied domain context (from --system) to a

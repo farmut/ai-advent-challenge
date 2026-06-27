@@ -273,16 +273,7 @@ func prepend(block, existing string) string {
 	return block
 }
 
-// DirectCall sends messages directly to the LLM without touching history, memory, or stats.
-// Used for agent-internal meta-calls (invariant compliance checks, etc.).
-func (uc *ChatUseCase) DirectCall(ctx context.Context, model string, messages []domain.Message, debug bool) (string, error) {
-	resp, err := uc.llm.Chat(ctx, port.LLMRequest{
-		Model:    model,
-		Messages: messages,
-		Debug:    debug,
-	})
-	if err != nil {
-		return "", err
-	}
-	return resp.Content, nil
+// LLM returns the underlying LLMClient for use by sub-agents that need direct API access.
+func (uc *ChatUseCase) LLM() port.LLMClient {
+	return uc.llm
 }
