@@ -50,6 +50,21 @@ func TestTransition_ValidationToDone(t *testing.T) {
 	}
 }
 
+func TestTransition_ValidationToExecution_DoesNotIncrementIteration(t *testing.T) {
+	ts := NewTaskState("id", "task")
+	_ = ts.Transition(PhaseExecution)
+	_ = ts.Transition(PhaseValidation)
+	if err := ts.Transition(PhaseExecution); err != nil {
+		t.Fatalf("unexpected error for validation→execution: %v", err)
+	}
+	if ts.Phase != PhaseExecution {
+		t.Errorf("expected %q, got %q", PhaseExecution, ts.Phase)
+	}
+	if ts.Iteration != 1 {
+		t.Errorf("validation→execution must not increment iteration, got %d", ts.Iteration)
+	}
+}
+
 func TestTransition_ValidationToPlanning_IncrementsIteration(t *testing.T) {
 	ts := NewTaskState("id", "task")
 	_ = ts.Transition(PhaseExecution)

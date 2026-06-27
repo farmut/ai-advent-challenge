@@ -19,7 +19,7 @@ const (
 var allowedTransitions = map[TaskPhase][]TaskPhase{
 	PhasePlanning:   {PhaseExecution},
 	PhaseExecution:  {PhaseValidation},
-	PhaseValidation: {PhaseDone, PhasePlanning},
+	PhaseValidation: {PhaseDone, PhasePlanning, PhaseExecution},
 }
 
 // TaskState is the persisted state of a single task through the state machine.
@@ -50,7 +50,7 @@ func NewTaskState(id, task string) TaskState {
 }
 
 // Transition advances the FSM to the target phase.
-// Transitioning back to planning (after validation rejection) increments Iteration.
+// Transitioning back to planning increments Iteration; all other transitions do not.
 func (ts *TaskState) Transition(to TaskPhase) error {
 	for _, ok := range allowedTransitions[ts.Phase] {
 		if ok == to {
