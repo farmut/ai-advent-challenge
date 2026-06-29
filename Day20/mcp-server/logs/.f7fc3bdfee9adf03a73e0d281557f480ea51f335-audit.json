@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/amachulin/ai_advent_challenge/ai-advent-challenge/Day20/mcp-server/logs/.f7fc3bdfee9adf03a73e0d281557f480ea51f335-audit.json",
+    "files": [
+        {
+            "date": 1782724473014,
+            "name": "/Users/amachulin/ai_advent_challenge/ai-advent-challenge/Day20/mcp-server/logs/mcp-puppeteer-2026-06-29.log",
+            "hash": "50190734d6c014a1d8d34b18c897a5e259811ca4ffec467523f511250b1f6310"
+        }
+    ],
+    "hashType": "sha256"
+}
