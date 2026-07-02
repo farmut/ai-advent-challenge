@@ -43,3 +43,8 @@ temperature_result.txt
 # Chat history
 chat_history*.json
 *_history.json
+
+# RAG artifacts
+*.pdf
+*.txt
+*.db

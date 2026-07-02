@@ -1,0 +1,26 @@
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:14:33.030"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:14:33.030"}
+{"level":"info","message":"Puppeteer MCP Server closing","service":"mcp-puppeteer","timestamp":"2026-06-29 12:14:33.033"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:36:03.813"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:36:03.813"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:36:43.417"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:36:43.417"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:49:20.159"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:49:20.160"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:50:21.247"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:50:21.248"}
+{"arguments":{},"level":"debug","message":"Tool call received","service":"mcp-puppeteer","timestamp":"2026-06-29 12:50:21.250","tool":"puppeteer_connect_active_tab"}
+{"0":"n","1":"p","2":"x","level":"info","message":"Launching browser with config:","service":"mcp-puppeteer","timestamp":"2026-06-29 12:50:21.250"}
+{"level":"info","message":"Browser launched successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:50:24.192"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:54:20.481"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:54:20.481"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 12:59:02.539"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 12:59:02.540"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 13:00:05.658"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 13:00:05.659"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 13:03:18.734"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 13:03:18.734"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 13:12:42.752"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 13:12:42.752"}
+{"level":"info","message":"Starting MCP server","service":"mcp-puppeteer","timestamp":"2026-06-29 13:21:18.384"}
+{"level":"info","message":"MCP server started successfully","service":"mcp-puppeteer","timestamp":"2026-06-29 13:21:18.385"}
