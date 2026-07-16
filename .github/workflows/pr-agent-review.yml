@@ -1,0 +1,64 @@
+# PR review by the Day32 orchestrator agent.
+#
+# On every pull request the job builds the agent and runs it with the
+# agent.review.yaml config: a sub-agent fetches the PR diff through the
+# official github-mcp-server (docker, stdio), three analysts examine it
+# (potential bugs / architectural problems / code recommendations), and a
+# publisher posts inline comments plus a summary review back to the PR.
+#
+# Secrets required:
+#   OPENROUTER_API_KEY — LLM key for the reviewing model.
+# The GitHub token is the built-in secrets.GITHUB_TOKEN with
+# pull-requests: write (enough to publish a review on same-repo PRs; PRs from
+# forks get a read-only token and no secrets — the job skips them).
+
+name: PR Agent Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  agent-review:
+    # Fork PRs have no secrets and a read-only token — nothing to publish with.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: Day32/agent/go.sum
+
+      - name: Build agent
+        working-directory: Day32/agent
+        run: go build -o ai-adv-agent-agent .
+
+      - name: Pull github-mcp-server image
+        run: docker pull ghcr.io/github/github-mcp-server
+
+      - name: Run review agent
+        working-directory: Day32/agent
+        env:
+          LLM_PROVIDER: openrouter
+          LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_MODEL: openai/gpt-4o
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOOLSETS: pull_requests
+        run: |
+          # Re-run the job with "Enable debug logging" to get full request/tool-call traces.
+          ./ai-adv-agent-agent --config agent.review.yaml ${{ runner.debug == '1' && '--debug' || '' }} --query \
+            "Проведи code review pull request #${{ github.event.pull_request.number }} в репозитории ${{ github.repository }}. \
+            Сначала получи diff PR, затем собери находки экспертов (потенциальные баги, архитектурные проблемы, рекомендации по коду) \
+            и опубликуй ревью с inline-комментариями и сводкой. Если публикация не удалась — приведи текст ошибки дословно."
