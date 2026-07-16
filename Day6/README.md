@@ -1,4 +1,4 @@
-# Day 3: System Role Support
+# Day 6: System Role Support
 
 Версия Day2 с поддержкой системной роли (system message) для более точного управления поведением LLM.
 

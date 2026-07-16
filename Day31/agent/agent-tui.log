@@ -1,0 +1,27 @@
+[git-mcp] server started (stdio), repo=/Users/amachulin/ai_advent_challenge/ai-advent-challenge
+[git-mcp] ← initialize (id=1)
+[git-mcp] ← notifications/initialized (id=<nil>)
+[git-mcp] ← tools/list (id=2)
+[mcp] 1 server(s), 3 tool(s) available
+[orchestrator] model=deepseek/deepseek-v4-flash  subagents=3  rag=false  mcp=true
+[git-mcp] ← tools/call (id=3)
+[git-mcp]   calling tool "git_current_branch" with map[]
+[git-mcp]   → 5 bytes
+[git-mcp] ← tools/call (id=4)
+[git-mcp]   calling tool "git_list_files" with map[filter:changed]
+[git-mcp]   → 448 bytes
+[git-mcp] ← tools/call (id=5)
+[git-mcp]   calling tool "git_diff" with map[path:CLAUDE.md]
+[git-mcp]   → 23579 bytes
+[git-mcp] ← tools/call (id=6)
+[git-mcp]   calling tool "git_diff" with map[path:Day12/README.md]
+[git-mcp]   → 568 bytes
+[git-mcp] ← tools/call (id=7)
+[git-mcp]   calling tool "git_diff" with map[path:Day17/agent/README.md]
+[git-mcp]   → 973 bytes
+[git-mcp] ← tools/call (id=8)
+[git-mcp]   calling tool "git_diff" with map[path:Day19/agent/README.md]
+[git-mcp]   → 798 bytes
+[git-mcp] ← tools/call (id=9)
+[git-mcp]   calling tool "git_diff" with map[path:Day20/agent/README.md]
+[git-mcp]   → 798 bytes
