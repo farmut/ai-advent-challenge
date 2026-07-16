@@ -59,6 +59,7 @@ jobs:
         run: |
           # Re-run the job with "Enable debug logging" to get full request/tool-call traces.
           ./ai-adv-agent-agent --config agent.review.yaml ${{ runner.debug == '1' && '--debug' || '' }} --query \
-            "Проведи code review pull request #${{ github.event.pull_request.number }} в репозитории ${{ github.repository }}. \
+            "Проведи code review pull request. Точные параметры PR (передавай их ДОСЛОВНО каждому саб-агенту в контексте): \
+            owner=${{ github.repository_owner }} repo=${{ github.event.repository.name }} pullNumber=${{ github.event.pull_request.number }}. \
             Сначала получи diff PR, затем собери находки экспертов (потенциальные баги, архитектурные проблемы, рекомендации по коду) \
             и опубликуй ревью с inline-комментариями и сводкой. Если публикация не удалась — приведи текст ошибки дословно."
