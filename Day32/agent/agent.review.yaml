@@ -69,11 +69,11 @@ orchestrator:
     - name: diff-reader
       prompt: >
         Ты получаешь данные pull request через GitHub-инструменты.
-        По номеру PR и репозиторию из задачи вызови инструменты, чтобы получить
-        diff PR (get_pull_request_diff) и список изменённых файлов
-        (get_pull_request_files). Верни полный diff и список файлов без
-        собственных оценок. Если diff обрезан по размеру — верни то, что есть,
-        и явно отметь обрезание.
+        По номеру PR и репозиторию из задачи вызови инструмент pull_request_read
+        дважды: с method="get_diff" (полный diff) и с method="get_files"
+        (список изменённых файлов). Параметры: owner, repo, pullNumber, method.
+        Верни полный diff и список файлов без собственных оценок. Если diff
+        обрезан по размеру — верни то, что есть, и явно отметь обрезание.
       rag: false
       mcp: ["github"]
       memory: { wm: false }
@@ -117,17 +117,19 @@ orchestrator:
       prompt: >
         Ты публикуешь результат ревью в pull request через GitHub-инструменты.
         Тебе передан номер PR, репозиторий и находки трёх экспертов (баги,
-        архитектура, рекомендации). Опубликуй ревью со статусом COMMENT (не
-        APPROVE и не REQUEST_CHANGES): создай отложенное ревью
-        (create_pending_pull_request_review), добавь inline-комментарии к
-        конкретным файлам и строкам (add_comment_to_pending_review; параметры
-        path, line — строка НОВОЙ версии файла, side=RIGHT), затем отправь
-        (submit_pending_pull_request_review) с телом-сводкой из трёх разделов:
+        архитектура, рекомендации). Порядок публикации строго такой:
+        1) pull_request_review_write с method="create_review" (owner, repo,
+        pullNumber; БЕЗ event — это создаёт отложенное pending-ревью);
+        2) для каждой находки с конкретным местом — add_comment_to_pending_review
+        (owner, repo, pullNumber, body, path — путь файла из diff,
+        subjectType="LINE", line — номер строки НОВОЙ версии файла, side="RIGHT");
+        3) pull_request_review_write с method="submit_review", event="COMMENT"
+        (не APPROVE и не REQUEST_CHANGES) и body — сводкой из трёх разделов:
         «Потенциальные баги», «Архитектурные проблемы», «Рекомендации по коду».
         Комментарии пиши по-русски, кратко и по делу. Если находок нет —
-        отправь одно сводное ревью «замечаний нет» без inline-комментариев.
-        В конце верни ссылку на опубликованное ревью или краткий отчёт о том,
-        что опубликовано.
+        пропусти шаг 2 и отправь сводное ревью «замечаний нет». Если вызов
+        инструмента вернул ошибку — приведи её текст ДОСЛОВНО в своём ответе.
+        В конце верни краткий отчёт: что опубликовано, сколько inline-комментариев.
       rag: false
       mcp: ["github"]
       memory: { wm: false }

@@ -57,7 +57,8 @@ jobs:
           GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOOLSETS: pull_requests
         run: |
-          ./ai-adv-agent-agent --config agent.review.yaml --query \
+          # Re-run the job with "Enable debug logging" to get full request/tool-call traces.
+          ./ai-adv-agent-agent --config agent.review.yaml ${{ runner.debug == '1' && '--debug' || '' }} --query \
             "Проведи code review pull request #${{ github.event.pull_request.number }} в репозитории ${{ github.repository }}. \
             Сначала получи diff PR, затем собери находки экспертов (потенциальные баги, архитектурные проблемы, рекомендации по коду) \
-            и опубликуй ревью с inline-комментариями и сводкой."
+            и опубликуй ревью с inline-комментариями и сводкой. Если публикация не удалась — приведи текст ошибки дословно."
