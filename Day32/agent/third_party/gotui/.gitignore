@@ -1,0 +1,10 @@
+.DS_Store
+.vscode/
+.mypy_cache/
+.idea
+hostkey
+hostkey.pub
+.pub
+ssh_dashboard
+.cursorrules
+.agent/
