@@ -70,7 +70,7 @@ type toolResult struct {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-
+// Основная функция приложения
 func main() {
 	addr := flag.String("addr", "", "HTTP+SSE listen address (e.g. :8080); if empty, stdio transport is used")
 	flag.Parse()
