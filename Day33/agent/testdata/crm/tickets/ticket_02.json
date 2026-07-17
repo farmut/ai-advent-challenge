@@ -1,0 +1,20 @@
+{
+  "id": "TCK-1002",
+  "created_at": "2026-07-10T11:05:00Z",
+  "channel": "chat",
+  "priority": "normal",
+  "category": "shipping",
+  "customer": {
+    "name": "Мария ебедева",
+    "email": "maria.l@example.com"
+  },
+  "order_id": "",
+  "subject": "Бесплатная доставка от какой суммы?",
+  "body": "Хочу собрать заказ так, чтобы доставка была бесплатной. От какой суммы она бесплатная и учитывается ли скидка при расчёте порога?",
+  "kb_topic": "shipping",
+  "on_topic": true,
+  "expected_keywords": [
+    "5000",
+    "бесплат"
+  ]
+}
