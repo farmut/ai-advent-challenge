@@ -1,0 +1,21 @@
+{
+  "id": "TCK-1006",
+  "created_at": "2026-07-09T10:03:00Z",
+  "channel": "email",
+  "priority": "high",
+  "category": "warranty",
+  "customer": {
+    "name": "Елена Новикова",
+    "email": "e.novikova@example.com"
+  },
+  "order_id": "FV-20260620-0333",
+  "subject": "Кривая покраска — это брак?",
+  "body": "У фигмы неаккуратно нанесена краска на лице, есть подтёк. Считается ли это производственным браком и какой срок гарантии?",
+  "kb_topic": "warranty",
+  "on_topic": true,
+  "expected_keywords": [
+    "30",
+    "брак",
+    "замен"
+  ]
+}

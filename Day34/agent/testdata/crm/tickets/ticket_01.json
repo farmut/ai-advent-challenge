@@ -1,0 +1,22 @@
+{
+  "id": "TCK-1001",
+  "created_at": "2026-07-10T09:32:00Z",
+  "channel": "email",
+  "priority": "normal",
+  "category": "shipping",
+  "customer": {
+    "name": "Иван Соколов",
+    "email": "i.sokolov@example.com"
+  },
+  "order_id": "FV-20260710-0453",
+  "subject": "Сколько идёт доставка СДЭК до Новосибирска?",
+  "body": "Здравствуйте! Оформил заказ фигурки Геральта, выбрал СДЭК до пункта выдачи. Подскажите, за сколько дней примерно доедет и сколько стоит доставка?",
+  "kb_topic": "shipping",
+  "on_topic": true,
+  "expected_keywords": [
+    "3",
+    "5",
+    "290",
+    "СДЭК"
+  ]
+}

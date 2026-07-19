@@ -1,0 +1,20 @@
+{
+  "id": "TCK-1008",
+  "created_at": "2026-07-08T15:52:00Z",
+  "channel": "email",
+  "priority": "normal",
+  "category": "payments",
+  "customer": {
+    "name": "ООО Гейм-Ритейл",
+    "email": "buh@gameretail.example.com"
+  },
+  "order_id": "FV-20260702-0055",
+  "subject": "Нужны документы для юрлица",
+  "body": "Мы юридическое лицо, оплатили заказ по счёту. Нужны закрывающие документы — акт и УПД. Как их получить?",
+  "kb_topic": "payments",
+  "on_topic": true,
+  "expected_keywords": [
+    "УПД",
+    "акт"
+  ]
+}

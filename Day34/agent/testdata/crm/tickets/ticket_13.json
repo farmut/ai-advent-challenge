@@ -1,0 +1,21 @@
+{
+  "id": "TCK-1013",
+  "created_at": "2026-07-09T17:33:00Z",
+  "channel": "email",
+  "priority": "normal",
+  "category": "authenticity",
+  "customer": {
+    "name": "Роман Соловьёв",
+    "email": "r.solovyov@example.com"
+  },
+  "order_id": "FV-20260630-0644",
+  "subject": "Как убедиться, что фигурка оригинал?",
+  "body": "Планирую дорогую статую Prime 1 Studio. Как понять, что это официальный оригинал, а не реплика?",
+  "kb_topic": "authenticity_care",
+  "on_topic": true,
+  "expected_keywords": [
+    "голограмм",
+    "лиценз",
+    "сертификат"
+  ]
+}
