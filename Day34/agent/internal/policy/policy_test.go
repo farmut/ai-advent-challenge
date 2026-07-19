@@ -88,6 +88,77 @@ func guard(t *testing.T, readRoot, writeRoot string) FS {
 	}
 }
 
+// Regression: the git tools report paths from the repository root, so they arrive
+// prefixed with our own root's name ("Day34/workspace/bot.py"). Taken literally
+// that resolves to Day34/Day34/... and can never succeed, which left a sub-agent
+// retrying the same doomed call until its round budget ran out.
+func TestCheck_StripsRedundantRootPrefix(t *testing.T) {
+	readRoot, writeRoot := fixture(t)
+	p := guard(t, readRoot, writeRoot)
+
+	t.Run("read path prefixed with the root name resolves", func(t *testing.T) {
+		args := map[string]interface{}{"path": "root/internal/app/toolbelt.go"}
+		if err := p.Check("fs", "read_text_file", args); err != nil {
+			t.Fatalf("prefixed read path must be accepted, got: %v", err)
+		}
+		got, _ := args["path"].(string)
+		want := filepath.Join(readRoot, "internal", "app", "toolbelt.go")
+		if got != want {
+			t.Fatalf("path must be normalised to %q, got %q", want, got)
+		}
+	})
+
+	t.Run("write path prefixed with the root name resolves", func(t *testing.T) {
+		args := map[string]interface{}{"path": "root/workspace/new.md", "content": "x"}
+		if err := p.Check("fs", "write_file", args); err != nil {
+			t.Fatalf("prefixed write path must be accepted, got: %v", err)
+		}
+	})
+
+	// The alias is a convenience, not a hole: it re-runs the same validation, so a
+	// prefixed path pointing outside the write root is still refused.
+	t.Run("prefix does not grant escape", func(t *testing.T) {
+		args := map[string]interface{}{"path": "root/internal/app/toolbelt.go", "content": "x"}
+		err := p.Check("fs", "write_file", args)
+		if err == nil {
+			t.Fatal("prefixed path outside the write root must still be denied")
+		}
+		if CodeOf(err) != CodeReadOnlyPath {
+			t.Fatalf("want %s, got %v", CodeReadOnlyPath, err)
+		}
+	})
+
+	t.Run("prefix does not bypass deny globs", func(t *testing.T) {
+		args := map[string]interface{}{"path": "root/.env"}
+		err := p.Check("fs", "read_text_file", args)
+		if err == nil {
+			t.Fatal("prefixed path to a denied file must stay denied")
+		}
+		if CodeOf(err) != CodeDeniedByPolicy {
+			t.Fatalf("want %s, got %v", CodeDeniedByPolicy, err)
+		}
+	})
+}
+
+// The message is the model's only feedback channel, and a bare "does not exist"
+// left it guessing which root paths are counted from.
+func TestCheck_NotFoundMessageNamesTheRoot(t *testing.T) {
+	readRoot, writeRoot := fixture(t)
+	p := guard(t, readRoot, writeRoot)
+
+	err := p.Check("fs", "read_text_file", map[string]interface{}{"path": "nope/missing.go"})
+	if err == nil {
+		t.Fatal("missing file must be refused")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, filepath.Base(readRoot)+"/") {
+		t.Errorf("message must name the root %q, got: %s", filepath.Base(readRoot), msg)
+	}
+	if !strings.Contains(msg, "git") {
+		t.Errorf("message must warn that git paths use a different root, got: %s", msg)
+	}
+}
+
 func TestCheck(t *testing.T) {
 	readRoot, writeRoot := fixture(t)
 

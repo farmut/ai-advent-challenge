@@ -63,16 +63,20 @@ mcp:
     # ${READ_ROOT} подставляется config.ResolvePaths абсолютным путём,
     # поэтому каталог запуска агента не важен.
     #
-    # ВНИМАНИЕ про версию: пакет сообщает serverInfo.version "0.2.0" во ВСЕХ
-    # релизах — эта строка в upstream захардкожена и НЕ равна версии в npm.
-    # Нужный набор из 14 тулов (с read_text_file / edit_file / directory_tree)
-    # даёт npm-версия 2025.8.21. У npm-пакета 0.2.0 набор другой (9 тулов, без
-    # read_text_file и edit_file), и он вдобавок не стартует: dist/index.js
-    # импортирует zod-to-json-schema, не объявленный в зависимостях.
+    # ВНИМАНИЕ про версию — проверять НЕ ТОЛЬКО имена тулов, но и их схемы.
+    # Пакет сообщает serverInfo.version "0.2.0" во ВСЕХ релизах: строка в upstream
+    # захардкожена и НЕ равна версии в npm. Хуже того, npm-версия 2025.8.21 отдаёт
+    # правильные 14 имён, но с ПУСТЫМ inputSchema ({"$schema": ...} без properties
+    # и required). Модель при этом считает, что файловые тулы не принимают
+    # аргументов, вызывает их без path и получает сплошной BAD_ARGUMENT — то есть
+    # агент теряет способность читать и писать файлы, но выглядит работающим.
+    # 2026.7.10 отдаёт схемы полностью (path/tail/head, required: [path]).
+    # У npm-пакета 0.2.0 набор другой (9 тулов) и он вовсе не стартует.
+    # При смене версии обязателен прогон: make test-fsguard-live.
     - name: fs
       type: stdio
       command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "${READ_ROOT}"]
+      args: ["-y", "@modelcontextprotocol/server-filesystem@2026.7.10", "${READ_ROOT}"]
 
     # Быстрый поиск по содержимому: find_files / grep / multi_grep.
     # Область поиска фиксируется позиционным аргументом при старте —
@@ -129,7 +133,7 @@ consultant:
     # Только чтение и поиск: write_root пуст → запись запрещена (fail-closed).
     allow: ["read_text_file", "read_multiple_files", "list_directory",
             "directory_tree", "get_file_info", "search_files",
-            "grep", "find_files", "multi_grep",
+            "grep", "find_files", "multi_grep", "list_allowed_directories",
             "git_current_branch", "git_list_files", "git_diff"]
   prompt: >
     Ты консультант по документации и коду этого репозитория. Отвечай на основе
@@ -161,7 +165,7 @@ orchestrator:
       tools:
         allow: ["read_text_file", "read_multiple_files", "list_directory",
                 "directory_tree", "get_file_info", "search_files",
-                "grep", "find_files", "multi_grep",
+                "grep", "find_files", "multi_grep", "list_allowed_directories",
                 "git_current_branch", "git_list_files", "git_diff"]
         # write_root не задан → запись запрещена (fail-closed)
       memory: { wm: true }
@@ -183,7 +187,7 @@ orchestrator:
       tools:
         allow: ["read_text_file", "read_multiple_files", "list_directory",
                 "directory_tree", "get_file_info", "search_files",
-                "grep", "find_files", "multi_grep",
+                "grep", "find_files", "multi_grep", "list_allowed_directories",
                 "write_file", "edit_file", "create_directory"]
         write_root: "../workspace"   # единственный каталог, куда разрешена запись
       memory: { wm: true }
@@ -203,6 +207,6 @@ orchestrator:
       tools:
         allow: ["read_text_file", "read_multiple_files", "list_directory",
                 "directory_tree", "get_file_info", "search_files",
-                "grep", "find_files", "multi_grep",
+                "grep", "find_files", "multi_grep", "list_allowed_directories",
                 "git_current_branch", "git_list_files", "git_diff"]
       memory: { wm: false }

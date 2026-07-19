@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"ai-adv-agent/internal/domain"
 	"ai-adv-agent/internal/port"
@@ -268,6 +269,55 @@ func (uc *ChatUseCase) Execute(ctx context.Context, cfg ChatConfig) (ChatResult,
 
 const maxToolCallRounds = 20
 
+// maxRepeatedToolFailures caps how many times the same tool may fail the same way
+// before the tool loop is abandoned. Observed failure mode: a sub-agent fed file
+// paths from a different root kept calling read_text_file with paths the guard
+// could never accept, burning every round on one dead end.
+const maxRepeatedToolFailures = 4
+
+// stuckDetector spots a tool loop that repeats one identical failure. It keys on
+// the tool name plus the error's leading code so retries with a different path
+// still count as the same dead end, while a genuinely new error resets it.
+type stuckDetector struct {
+	key   string
+	count int
+}
+
+func (s *stuckDetector) record(tool string, err error) {
+	k := tool + "|" + failureKey(err)
+	if k == s.key {
+		s.count++
+		return
+	}
+	s.key, s.count = k, 1
+}
+
+func (s *stuckDetector) reset() { s.key, s.count = "", 0 }
+
+func (s *stuckDetector) verdict() (string, bool) {
+	if s.count < maxRepeatedToolFailures {
+		return "", false
+	}
+	tool, _, _ := strings.Cut(s.key, "|")
+	return fmt.Sprintf(
+		"Прерываю: инструмент %s %d раза подряд вернул одну и ту же ошибку, продвижения нет. "+
+			"Скорее всего аргументы систематически неверны (например, путь считается не от того корня). "+
+			"Последняя ошибка: %s", tool, s.count, strings.SplitN(s.key, "|", 2)[1]), true
+}
+
+// failureKey reduces an error to its stable part: the machine-readable code when
+// the guard produced one, otherwise a trimmed prefix of the message.
+func failureKey(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, ":"); i > 0 && i < 40 {
+		return msg[:i]
+	}
+	if len(msg) > 40 {
+		return msg[:40]
+	}
+	return msg
+}
+
 // ExecuteWithTools runs one full chat turn with MCP tool-calling support.
 // The LLM receives the tool definitions in the request; when it produces tool_calls the
 // executor callback is invoked and results are fed back until the LLM produces a final
@@ -337,6 +387,7 @@ func (uc *ChatUseCase) ExecuteWithTools(ctx context.Context, cfg ChatConfig, too
 	prevPromptTokens := stats.LastCallPromptTokens
 	var totalUsage domain.Usage
 	var finalContent string
+	var stuck stuckDetector
 
 	for round := 0; round < maxToolCallRounds; round++ {
 		resp, err := uc.llm.Chat(ctx, port.LLMRequest{
@@ -385,6 +436,9 @@ func (uc *ChatUseCase) ExecuteWithTools(ctx context.Context, cfg ChatConfig, too
 			result, err := executor(ctx, tc.Name, tc.Arguments)
 			if err != nil {
 				result = fmt.Sprintf("error: %v", err)
+				stuck.record(tc.Name, err)
+			} else {
+				stuck.reset()
 			}
 			if cfg.Debug {
 				fmt.Fprintf(os.Stderr, "[tool-result] %s: %s\n", tc.Name, result)
@@ -395,6 +449,16 @@ func (uc *ChatUseCase) ExecuteWithTools(ctx context.Context, cfg ChatConfig, too
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 			})
+		}
+
+		// A model that keeps hitting the identical failure is not making progress;
+		// it will burn every remaining round on the same dead end. Stop and say so,
+		// so the caller sees the real reason instead of an exhausted budget.
+		if msg, halted := stuck.verdict(); halted {
+			fmt.Fprintf(os.Stderr, "[tool-loop] %s\n", msg)
+			turnMsgs = append(turnMsgs, domain.Message{Role: domain.RoleAssistant, Content: msg})
+			finalContent = msg
+			break
 		}
 	}
 

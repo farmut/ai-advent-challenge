@@ -179,7 +179,7 @@ orchestrator:
 
 | Сервер | Что даёт | Запуск |
 |---|---|---|
-| `fs` — [`@modelcontextprotocol/server-filesystem`](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) | 14 файловых тулов: чтение, листинг, дерево, метаданные, запись, правка | `npx -y @modelcontextprotocol/server-filesystem@2025.8.21 <каталог>` |
+| `fs` — [`@modelcontextprotocol/server-filesystem`](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) | 14 файловых тулов: чтение, листинг, дерево, метаданные, запись, правка | `npx -y @modelcontextprotocol/server-filesystem@2026.7.10 <каталог>` |
 | `search` — [`fff-mcp`](https://github.com/dmtrKovalenko/fff) 0.10.0 | 3 тула быстрого поиска по именам и содержимому | `fff-mcp <каталог> --no-update-check --no-watch` |
 
 Установка:
@@ -190,7 +190,13 @@ brew install dmtrKovalenko/fff/fff-mcp   # search
 make check-tooling                        # проверить, что оба на месте
 ```
 
-**Про версию `fs`.** Пакет во всех релизах сообщает `serverInfo.version: "0.2.0"` — эта строка в upstream захардкожена и не равна версии в npm. Нужный набор из 14 тулов даёт npm-версия **`2025.8.21`**, она и прибита в конфиге. У npm-пакета `0.2.0` набор другой (9 тулов, без `read_text_file` и `edit_file`), и он вдобавок не стартует — `dist/index.js` импортирует `zod-to-json-schema`, не объявленный в зависимостях.
+**Про версию `fs` — проверять схемы, а не только имена тулов.** Пакет во всех релизах сообщает `serverInfo.version: "0.2.0"`: строка в upstream захардкожена и не равна версии в npm. Прибита версия **`2026.7.10`**.
+
+Здесь была наступлена грабля, стоившая отладки. Версия `2025.8.21` отдаёт правильные 14 имён тулов, но с **пустым `inputSchema`** — `{"$schema": …}` без `properties` и `required`. Набор имён совпадает с `policy.FSToolNames()`, поэтому проверка «тулы на месте» проходит, а модель получает сведения, что файловые инструменты **не принимают аргументов**: она вызывает `read_text_file` без `path`, получает `BAD_ARGUMENT`, и так по кругу. Внешне агент жив и отвечает, но не может ни прочитать, ни записать файл — и, что хуже, может отрапортовать об успешном сохранении.
+
+У npm-пакета `0.2.0` набор другой (9 тулов) и он не стартует вовсе — `dist/index.js` импортирует `zod-to-json-schema`, не объявленный в зависимостях.
+
+**При любой смене версии обязателен `make test-fsguard-live`** — он поднимает настоящий сервер и падает, если схемы пусты.
 
 Флаг `--no-update-check` у `fff-mcp` обязателен, иначе сервер лезет в сеть на старте. `--follow-symlinks` по умолчанию выключен и включать его не следует.
 

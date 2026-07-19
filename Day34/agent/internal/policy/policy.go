@@ -305,6 +305,21 @@ func (p FS) checkPath(tool, arg, raw string, spec ToolSpec, root string) (string
 
 	abs, rel, err := resolveUnder(p.baseRoot(), root, raw, spec.mustExistFor(arg), spec.Kind, p.writeHint())
 	if err != nil {
+		// The git tools report paths relative to the repository root, which sits
+		// above our read root, so their output arrives prefixed with the root's
+		// own name ("Day34/workspace/bot.py"). Taken literally that resolves to
+		// Day34/Day34/... and always fails, which used to leave the model retrying
+		// blindly. Retry once with the redundant prefix removed. This grants no
+		// new reach: the stripped path goes through the very same validation.
+		if alias, ok := p.stripRootPrefix(raw); ok {
+			// Adopt the alias outcome wholesale, including its error. The literal
+			// reading demonstrably does not exist, so its complaint ("create the
+			// parent directory first") describes a path nobody meant and would
+			// send the model chasing the wrong fix.
+			abs, rel, err = resolveUnder(p.baseRoot(), root, alias, spec.mustExistFor(arg), spec.Kind, p.writeHint())
+		}
+	}
+	if err != nil {
 		return "", p.deny(tool, arg, raw, err)
 	}
 	if pattern, hit := p.denied(rel); hit {
@@ -338,6 +353,26 @@ func (p FS) sampleRel(kind ToolKind) string {
 }
 
 // writeHint renders the write root as a short human-facing prefix.
+// stripRootPrefix removes a leading segment equal to the read root's own
+// directory name ("Day34/foo" -> "foo"). It reports false when the path does not
+// carry that prefix, so the caller keeps the original error.
+func (p FS) stripRootPrefix(raw string) (string, bool) {
+	base := filepath.Base(p.baseRoot())
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return "", false
+	}
+	c := filepath.ToSlash(filepath.Clean(raw))
+	prefix := base + "/"
+	if !strings.HasPrefix(c, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(c, prefix)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
 func (p FS) writeHint() string {
 	if p.WriteRoot == "" {
 		return "workspace/"
@@ -415,7 +450,8 @@ func resolveUnder(base, constraint, rel string, mustExist bool, kind ToolKind, w
 	// 1. Empty path: never default to the root.
 	if rel == "" {
 		return "", "", newErr(CodeBadArgument,
-			"путь пуст, а он обязателен. Укажи относительный путь, например %q.", "internal/app/toolbelt.go")
+			"путь пуст, а он обязателен. Укажи путь относительно корня %s/, например %q.",
+			filepath.Base(base), "agent/main.go")
 	}
 
 	// 2. Absolute paths are refused, not rebased.
@@ -453,7 +489,9 @@ func resolveUnder(base, constraint, rel string, mustExist bool, kind ToolKind, w
 		real, err = filepath.EvalSymlinks(full)
 		if err != nil {
 			return "", "", newErr(CodeBadArgument,
-				"путь %q не существует или недоступен. Проверь путь — например, посмотри каталог через list_directory.", rel)
+				"путь %q не существует относительно корня %s/. Пути считаются от этого корня, а НЕ от корня git-репозитория: "+
+					"вывод git-инструментов приходит с префиксом %s/ — отбрось его. Посмотреть каталог: list_directory.",
+				rel, filepath.Base(base), filepath.Base(base))
 		}
 	} else {
 		// 5b. Resolve the parent and re-attach the base name.

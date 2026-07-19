@@ -78,7 +78,7 @@ run-orchestrator-local: $(BINARY_NAME) ## [Day31][local] Orchestrator on a local
 # Day34: file tooling + permission model.
 #
 # Two external MCP servers do the file work (see agent.config.yaml):
-#   fs     — @modelcontextprotocol/server-filesystem@2025.8.21, launched via npx
+#   fs     — @modelcontextprotocol/server-filesystem@2026.7.10, launched via npx
 #            (the package hardcodes serverInfo.version "0.2.0" in every release —
 #             do not mistake that for the npm version; npm 0.2.0 does not start)
 #   search — fff-mcp (brew install dmtrKovalenko/fff/fff-mcp)

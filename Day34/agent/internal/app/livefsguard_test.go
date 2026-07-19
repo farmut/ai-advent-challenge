@@ -16,6 +16,7 @@ import (
 
 	"ai-adv-agent/internal/config"
 	"ai-adv-agent/internal/domain"
+	"ai-adv-agent/internal/policy"
 )
 
 func TestLiveFSGuard(t *testing.T) {
@@ -52,6 +53,34 @@ func TestLiveFSGuard(t *testing.T) {
 		t.Fatal("no tools from the live fs server")
 	}
 	t.Logf("live fs server exposed %d tools", len(tb.MCPTools))
+
+	// Regression: server-filesystem@2025.8.21 advertises the right 14 tool NAMES
+	// but with an empty inputSchema — no properties, no required. Checking names
+	// alone passed, while the model was being told these tools take no arguments;
+	// it then called read_text_file with no path and could neither read nor write.
+	// Names are not a contract — the schema is.
+	for _, tool := range tb.MCPTools {
+		if tb.ToolRouting[tool.Name].Name != "fs" {
+			continue
+		}
+		spec, known := policy.DefaultSpecs()[tool.Name]
+		if !known || len(spec.PathArgs) == 0 {
+			continue // tools we do not gate on a path (list_allowed_directories)
+		}
+		schema, _ := tool.InputSchema.(map[string]interface{})
+		props, _ := schema["properties"].(map[string]interface{})
+		if len(props) == 0 {
+			t.Errorf("tool %q has an EMPTY inputSchema — the model cannot know it takes arguments; "+
+				"check the pinned server-filesystem version", tool.Name)
+			continue
+		}
+		for _, arg := range spec.PathArgs {
+			if _, ok := props[arg]; !ok {
+				t.Errorf("tool %q schema lacks the %q property the guard gates on; schema and policy table disagree",
+					tool.Name, arg)
+			}
+		}
+	}
 
 	// Roles straight out of the shipped config.
 	var coder, researcher config.SubAgentConfig
@@ -96,6 +125,24 @@ func TestLiveFSGuard(t *testing.T) {
 	}
 	t.Log("step 10 ok: edit applied")
 
+	// Regression (agent-tui.log): the reviewer took file paths from the git tools,
+	// which report them from the repository root, so they arrived as
+	// "Day34/workspace/bot.py". Against a read root of Day34 that resolved to
+	// Day34/Day34/... and was refused every single time, and the sub-agent spent
+	// its whole round budget retrying. These must now succeed.
+	gitStyle := []struct{ tool, args string }{
+		{"read_text_file", `{"path":"Day34/workspace/live_probe.md"}`},
+		{"get_file_info", `{"path":"Day34/workspace/live_probe.md"}`},
+		{"list_directory", `{"path":"Day34/workspace"}`},
+	}
+	for _, c := range gitStyle {
+		if _, err := exec(ctx, c.tool, c.args); err != nil {
+			t.Errorf("git-style path FAILED: %s %s -> %v", c.tool, c.args, err)
+			continue
+		}
+		t.Logf("git-style path ok: %s %s", c.tool, c.args)
+	}
+
 	// Requirement 1: read outside the write root but inside the read root.
 	if _, err := exec(ctx, "read_text_file", `{"path":"agent/main.go"}`); err != nil {
 		t.Fatalf("step 7 FAILED: read inside read root must be allowed, got: %v", err)
@@ -110,6 +157,10 @@ func TestLiveFSGuard(t *testing.T) {
 		{"11b", "edit_file", `{"path":"agent/internal/app/toolbelt.go","edits":[{"oldText":"a","newText":"b"}]}`, "READ_ONLY_PATH"},
 		{"12", "read_text_file", `{"path":"agent/agent.config.yaml"}`, "DENIED_BY_POLICY"},
 		{"12b", "read_text_file", `{"path":".git/config"}`, "DENIED_BY_POLICY"},
+		// The root-prefix alias must not become an escape hatch: it re-runs the
+		// same validation, so a prefixed path outside the write root stays denied.
+		{"11c", "write_file", `{"path":"Day34/agent/main.go","content":"pwned"}`, "READ_ONLY_PATH"},
+		{"12c", "read_text_file", `{"path":"Day34/agent/agent.config.yaml"}`, "DENIED_BY_POLICY"},
 		{"14a", "write_file", `{"path":"../../../tmp/escape.txt","content":"x"}`, ""},
 		{"14b", "write_file", `{"path":"/tmp/escape.txt","content":"x"}`, "BAD_ARGUMENT"},
 		{"14c", "read_text_file", `{"path":"../../../etc/passwd"}`, ""},
