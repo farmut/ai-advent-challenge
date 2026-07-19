@@ -1,0 +1,20 @@
+{
+  "id": "TCK-1019",
+  "created_at": "2026-07-10T07:55:00Z",
+  "channel": "chat",
+  "priority": "normal",
+  "category": "payments",
+  "customer": {
+    "name": "Владислав Марков",
+    "email": "v.markov@example.com"
+  },
+  "order_id": "",
+  "subject": "Есть ли оплата при получении?",
+  "body": "Можно ли оплатить заказ наличными курьеру при получении — наложенным платежом?",
+  "kb_topic": "payments",
+  "on_topic": true,
+  "expected_keywords": [
+    "наложенн",
+    "не поддерж"
+  ]
+}

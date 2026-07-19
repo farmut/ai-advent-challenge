@@ -1,0 +1,21 @@
+{
+  "id": "TCK-1010",
+  "created_at": "2026-07-10T13:41:00Z",
+  "channel": "chat",
+  "priority": "normal",
+  "category": "preorders",
+  "customer": {
+    "name": "Артём Белов",
+    "email": "a.belov@example.com"
+  },
+  "order_id": "FV-20260410-0918",
+  "subject": "Релиз предзаказа сдвинулся",
+  "body": "Я делал предзаказ с релизом Q2 2026, а теперь пишут Q1 2027. Это почти год переноса. Могу ли я отменить и вернуть деньги?",
+  "kb_topic": "preorders",
+  "on_topic": true,
+  "expected_keywords": [
+    "6 месяц",
+    "возврат",
+    "депозит"
+  ]
+}

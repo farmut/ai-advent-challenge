@@ -1,0 +1,142 @@
+# Day32: PR-review orchestrator config for CI (GitHub Actions).
+#
+# The orchestrator reviews a GitHub pull request: a sub-agent fetches the PR
+# diff through the official github-mcp-server (stdio, docker), three analyst
+# sub-agents examine it (bugs / architecture / code quality), and a publisher
+# sub-agent posts the review back to the PR: inline comments on concrete lines
+# plus a summary review body.
+#
+# Required environment:
+#   LLM_PROVIDER / LLM_API_KEY / LLM_MODEL — the reviewing model (pick one with
+#     a large context window: the whole PR diff goes into the prompt)
+#   GITHUB_PERSONAL_ACCESS_TOKEN — token for github-mcp-server (in Actions:
+#     secrets.GITHUB_TOKEN with pull-requests: write permission)
+#   GITHUB_TOOLSETS=pull_requests — keeps the MCP tool list small
+#
+# Run:
+#   ./ai-adv-agent-agent --config agent.review.yaml \
+#     --query "Проведи ревью PR #123 в репозитории owner/repo"
+
+llm:
+  provider: ""          # env LLM_PROVIDER
+  model: ""             # env LLM_MODEL
+  temperature: 0.2      # review must be conservative and reproducible
+  max_tokens: 0
+
+# CI run is ephemeral — no memory files should be written or read.
+memory:
+  dir: review_session.json
+  auto_update: false
+  stm:  { enabled: false }
+  wm:   { enabled: false }
+  ltm:  { enabled: false }
+  facts: { enabled: false }
+  profile: { enabled: false }
+  task_memory: { enabled: false }
+
+rag:
+  enabled: false
+
+# Official GitHub MCP server, stdio via docker. The token and toolset limit are
+# inherited from the parent environment (the MCP adapter passes os.Environ()
+# through), docker just forwards them into the container.
+mcp:
+  enabled: true
+  servers:
+    - name: github
+      type: stdio
+      command: docker
+      args:
+        - run
+        - -i
+        - --rm
+        - -e
+        - GITHUB_PERSONAL_ACCESS_TOKEN
+        - -e
+        - GITHUB_TOOLSETS
+        - ghcr.io/github/github-mcp-server
+
+invariants:
+  enabled: false
+
+consultant:
+  enabled: false
+
+orchestrator:
+  enabled: true
+  max_rounds: 10
+  subagents:
+    - name: diff-reader
+      prompt: >
+        Ты получаешь данные pull request через GitHub-инструменты.
+        Значения owner, repo и pullNumber бери СТРОГО из переданной задачи или
+        контекста (owner=… repo=… pullNumber=…) — никогда не выводи их из путей
+        файлов. Вызови инструмент pull_request_read дважды: с method="get_diff"
+        (полный diff) и с method="get_files" (список изменённых файлов).
+        Параметры: owner, repo, pullNumber, method. Верни полный diff и список
+        файлов без собственных оценок, а в начале ответа повтори строку
+        "owner=… repo=… pullNumber=…". Если diff обрезан по размеру — верни то,
+        что есть, и явно отметь обрезание.
+      rag: false
+      mcp: ["github"]
+      memory: { wm: false }
+
+    - name: bug-hunter
+      prompt: >
+        Ты эксперт по поиску дефектов. По переданному diff найди потенциальные
+        баги: ошибки логики, off-by-one, гонки, утечки ресурсов, необработанные
+        ошибки, nil/None-разыменования, проблемы безопасности. Для каждой
+        находки укажи: файл, строку (по новой версии файла из diff), краткое
+        описание и серьёзность (critical/major/minor). Отвечай только по diff —
+        не выдумывай код, которого нет. Если багов не видно — так и скажи.
+      rag: false
+      mcp: []
+      memory: { wm: false }
+
+    - name: architect
+      prompt: >
+        Ты архитектор. По переданному diff оцени архитектурные проблемы:
+        нарушение слоёв и направления зависимостей, дублирование, протекающие
+        абстракции, нарушение существующих паттернов проекта, разрастание
+        ответственности, совместимость API. Для каждой проблемы: файл, строка
+        (если применимо), описание, предлагаемое направление исправления.
+        Отвечай только по diff. Если проблем нет — так и скажи.
+      rag: false
+      mcp: []
+      memory: { wm: false }
+
+    - name: code-reviewer
+      prompt: >
+        Ты ревьюер кода. По переданному diff дай рекомендации по качеству:
+        читаемость, именование, упрощение, идиоматичность, обработка ошибок,
+        тесты, документация. Для каждой рекомендации: файл, строка (по новой
+        версии из diff), конкретное предложение. Без вкусовщины — только то,
+        что реально улучшает код. Если замечаний нет — так и скажи.
+      rag: false
+      mcp: []
+      memory: { wm: false }
+
+    - name: publisher
+      prompt: >
+        Ты публикуешь результат ревью в pull request через GitHub-инструменты.
+        Тебе передан номер PR, репозиторий и находки трёх экспертов (баги,
+        архитектура, рекомендации). Значения owner, repo и pullNumber бери
+        СТРОГО из переданной задачи или контекста (строка вида
+        "owner=… repo=… pullNumber=…") — никогда не выводи их из путей файлов
+        в diff (путь вроде Day32/mcp-server — это каталог в репозитории, а не
+        owner/repo). Порядок публикации строго такой:
+        1) pull_request_review_write с method="create_review" (owner, repo,
+        pullNumber; БЕЗ event — это создаёт отложенное pending-ревью);
+        2) для каждой находки с конкретным местом — add_comment_to_pending_review
+        (owner, repo, pullNumber, body, path — путь файла из diff,
+        subjectType="LINE", line — номер строки НОВОЙ версии файла, side="RIGHT");
+        3) pull_request_review_write с method="submit_review", event="COMMENT"
+        (не APPROVE и не REQUEST_CHANGES) и body — сводкой из трёх разделов:
+        «Потенциальные баги», «Архитектурные проблемы», «Рекомендации по коду».
+        Комментарии пиши по-русски, кратко и по делу. Если находок нет —
+        пропусти шаг 2 и отправь сводное ревью «замечаний нет». Если вызов
+        инструмента вернул ошибку — приведи её текст ДОСЛОВНО в своём ответе.
+        В конце верни краткий отчёт: что опубликовано, сколько inline-комментариев.
+      rag: false
+      mcp: ["github"]
+      memory: { wm: false }
