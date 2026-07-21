@@ -1,0 +1,21 @@
+{
+  "id": "TCK-1003",
+  "created_at": "2026-07-09T14:20:00Z",
+  "channel": "email",
+  "priority": "normal",
+  "category": "returns",
+  "customer": {
+    "name": "Дмитрий Кузнецов",
+    "email": "d.kuz@example.com"
+  },
+  "order_id": "FV-20260705-0121",
+  "subject": "Можно ли вернуть фигурку, если передумал?",
+  "body": "Купил нендороида, но передумал — не подошёл по стилю к коллекции. Коробку не вскрывал. Можно вернуть и в какой срок?",
+  "kb_topic": "returns",
+  "on_topic": true,
+  "expected_keywords": [
+    "14",
+    "блистер",
+    "вскры"
+  ]
+}

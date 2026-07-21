@@ -1,0 +1,21 @@
+{
+  "id": "TCK-1007",
+  "created_at": "2026-07-10T12:30:00Z",
+  "channel": "chat",
+  "priority": "normal",
+  "category": "payments",
+  "customer": {
+    "name": "Сергей Орлов",
+    "email": "s.orlov@example.com"
+  },
+  "order_id": "",
+  "subject": "Можно ли оплатить долями?",
+  "body": "Хочу купить статую за 18000 рублей. Есть ли рассрочка или оплата частями, и берёте ли проценты?",
+  "kb_topic": "payments",
+  "on_topic": true,
+  "expected_keywords": [
+    "Долями",
+    "4",
+    "процент"
+  ]
+}
